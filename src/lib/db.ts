@@ -632,11 +632,6 @@ export async function renameFolder(id: number, name: string): Promise<void> {
   await database.execute('UPDATE media_folders SET name = ? WHERE id = ?', [name, id]);
 }
 
-export async function moveFolder(id: number, newParentId: number | null): Promise<void> {
-  const database = await getDb();
-  await database.execute('UPDATE media_folders SET parent_id = ? WHERE id = ?', [newParentId, id]);
-}
-
 // B6: persist a new sibling order for folders. `orderedIds` is the full list of
 // sibling folder ids (same scope/project/parent) in their desired order; each
 // row's `position` is rewritten to its index. Runs atomically in one
