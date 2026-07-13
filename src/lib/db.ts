@@ -36,6 +36,9 @@ export interface MediaRecord {
   duration: string | null;
   size: string | null;
   thumb: string | null;
+  // H.264 copy for in-app preview of HEVC/H.265 videos that WebView2 cannot
+  // decode. Null when the source is already WebView-compatible or has no copy.
+  preview_path: string | null;
   // B2: content hash used to dedup re-imports of an identical file within the
   // same destination (scope/project/folder). Null for pre-B2 rows.
   hash: string | null;
@@ -95,6 +98,7 @@ export async function initDb(): Promise<void> {
       duration TEXT,
       size TEXT,
       thumb TEXT,
+      preview_path TEXT,
       hash TEXT,
       scope TEXT NOT NULL DEFAULT 'project',
       folder_id INTEGER,
@@ -272,6 +276,10 @@ export async function initDb(): Promise<void> {
       if (!mcols.some((c) => c.name === 'hash')) {
         await database.execute('ALTER TABLE media ADD COLUMN hash TEXT');
       }
+      // HEVC preview: H.264 copy path for WebView-incompatible videos.
+      if (!mcols.some((c) => c.name === 'preview_path')) {
+        await database.execute('ALTER TABLE media ADD COLUMN preview_path TEXT');
+      }
       const pidNotNull = mcols.find((c) => c.name === 'project_id')?.notnull === 1;
       if (pidNotNull) {
         // Rebuild to relax the NOT NULL on project_id. Re-read the columns so
@@ -287,6 +295,7 @@ export async function initDb(): Promise<void> {
             duration TEXT,
             size TEXT,
             thumb TEXT,
+            preview_path TEXT,
             hash TEXT,
             scope TEXT NOT NULL DEFAULT 'project',
             folder_id INTEGER,
@@ -294,8 +303,8 @@ export async function initDb(): Promise<void> {
           )
         `);
         await database.execute(`
-          INSERT INTO media_new (id, project_id, type, name, path, duration, size, thumb, hash, scope, folder_id, created_at)
-          SELECT id, project_id, type, name, path, duration, size, thumb, hash, scope, folder_id, created_at FROM media
+          INSERT INTO media_new (id, project_id, type, name, path, duration, size, thumb, preview_path, hash, scope, folder_id, created_at)
+          SELECT id, project_id, type, name, path, duration, size, thumb, preview_path, hash, scope, folder_id, created_at FROM media
         `);
         await database.execute('DROP TABLE media');
         await database.execute('ALTER TABLE media_new RENAME TO media');
@@ -402,8 +411,8 @@ export async function listMedia(args: ListMediaArgs): Promise<MediaRecord[]> {
 export async function insertMedia(record: Omit<MediaRecord, 'id' | 'created_at'>): Promise<void> {
   const database = await getDb();
   await database.execute(
-    'INSERT INTO media (project_id, type, name, path, duration, size, thumb, hash, scope, folder_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    [record.project_id, record.type, record.name, record.path, record.duration, record.size, record.thumb, record.hash, record.scope, record.folder_id]
+    'INSERT INTO media (project_id, type, name, path, duration, size, thumb, preview_path, hash, scope, folder_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [record.project_id, record.type, record.name, record.path, record.duration, record.size, record.thumb, record.preview_path, record.hash, record.scope, record.folder_id]
   );
 }
 
@@ -523,6 +532,28 @@ export async function importMediaFile(args: ImportMediaArgs): Promise<ImportMedi
     console.error('probe_media_meta failed; using placeholders', err);
   }
 
+  // Video cover + HEVC preview. Images use themselves as the thumb; videos get
+  // a first-frame JPEG so the grid shows a real cover instead of a placeholder,
+  // and HEVC/H.265 sources (which WebView2 cannot decode) get an H.264 copy for
+  // in-app preview. All of this is best-effort: if ffmpeg is missing the import
+  // still succeeds, just without a cover/preview.
+  let thumb: string | null = args.type === 'image' ? destPath : null;
+  let previewPath: string | null = null;
+  if (args.type === 'video') {
+    try {
+      thumb = await invoke<string>('generate_thumbnail', { path: destPath });
+    } catch (err) {
+      console.error('generate_thumbnail failed; no cover for this video', err);
+    }
+    try {
+      previewPath = await invoke<string | null>('transcode_preview', {
+        path: destPath,
+      });
+    } catch (err) {
+      console.error('transcode_preview failed; preview may be audio-only', err);
+    }
+  }
+
   const record: Omit<MediaRecord, 'id' | 'created_at'> = {
     project_id: projectId,
     type: args.type,
@@ -530,7 +561,8 @@ export async function importMediaFile(args: ImportMediaArgs): Promise<ImportMedi
     path: destPath,
     duration,
     size,
-    thumb: args.type === 'image' ? destPath : null,
+    thumb,
+    preview_path: previewPath,
     hash,
     scope: args.scope,
     folder_id: folderId,
@@ -663,10 +695,33 @@ export async function moveMedia(
       sourcePath: row.path,
     });
   }
-  const newThumb = row.type === 'image' ? newPath : row.thumb;
+  // Cover/preview are sidecar files next to the physical media. When the file is
+  // relocated (scope change) those sidecars are left behind, so regenerate them
+  // at the new location for videos; images use themselves as the cover. When the
+  // file did not move, keep the existing cover/preview.
+  let newThumb = row.thumb;
+  let newPreview = row.preview_path;
+  if (row.type === 'image') {
+    newThumb = newPath;
+  } else if (row.type === 'video' && newPath !== row.path) {
+    newThumb = null;
+    newPreview = null;
+    try {
+      newThumb = await invoke<string>('generate_thumbnail', { path: newPath });
+    } catch (err) {
+      console.error('generate_thumbnail failed after move', err);
+    }
+    try {
+      newPreview = await invoke<string | null>('transcode_preview', {
+        path: newPath,
+      });
+    } catch (err) {
+      console.error('transcode_preview failed after move', err);
+    }
+  }
   await database.execute(
-    'UPDATE media SET scope = ?, project_id = ?, folder_id = ?, path = ?, thumb = ? WHERE id = ?',
-    [dest.scope, destProjectId, dest.folderId ?? null, newPath, newThumb, mediaId]
+    'UPDATE media SET scope = ?, project_id = ?, folder_id = ?, path = ?, thumb = ?, preview_path = ? WHERE id = ?',
+    [dest.scope, destProjectId, dest.folderId ?? null, newPath, newThumb, newPreview, mediaId]
   );
 }
 
@@ -687,6 +742,24 @@ export async function copyMedia(
     sourcePath: row.path,
   });
   const fileName = newPath.replace(/^.*[\\/]/, '');
+  // The copy has a new physical path; regenerate video cover/preview there so
+  // they don't point at the source's sidecars. Images use themselves as cover.
+  let copyThumb: string | null = row.type === 'image' ? newPath : null;
+  let copyPreview: string | null = null;
+  if (row.type === 'video') {
+    try {
+      copyThumb = await invoke<string>('generate_thumbnail', { path: newPath });
+    } catch (err) {
+      console.error('generate_thumbnail failed after copy', err);
+    }
+    try {
+      copyPreview = await invoke<string | null>('transcode_preview', {
+        path: newPath,
+      });
+    } catch (err) {
+      console.error('transcode_preview failed after copy', err);
+    }
+  }
   const record: Omit<MediaRecord, 'id' | 'created_at'> = {
     project_id: destProjectId,
     type: row.type,
@@ -694,7 +767,8 @@ export async function copyMedia(
     path: newPath,
     duration: row.duration,
     size: row.size,
-    thumb: row.type === 'image' ? newPath : row.thumb,
+    thumb: copyThumb,
+    preview_path: copyPreview,
     hash: row.hash ?? null,
     scope: dest.scope,
     folder_id: dest.folderId ?? null,
@@ -994,8 +1068,8 @@ export async function insertMediaReturningId(
 ): Promise<number> {
   const database = await getDb();
   const res = await database.execute(
-    'INSERT INTO media (project_id, type, name, path, duration, size, thumb, hash, scope, folder_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    [record.project_id, record.type, record.name, record.path, record.duration, record.size, record.thumb, record.hash, record.scope, record.folder_id]
+    'INSERT INTO media (project_id, type, name, path, duration, size, thumb, preview_path, hash, scope, folder_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [record.project_id, record.type, record.name, record.path, record.duration, record.size, record.thumb, record.preview_path, record.hash, record.scope, record.folder_id]
   );
   return res.lastInsertId as number;
 }

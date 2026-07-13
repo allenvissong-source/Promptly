@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { open, message } from '@tauri-apps/plugin-dialog';
+import { open, message, ask } from '@tauri-apps/plugin-dialog';
+import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { useProject } from '../../context/ProjectContext';
 import { useGenStore } from '../../context/GenStoreContext';
@@ -94,6 +95,35 @@ export default function MediaLibraryView({ mode }: { mode: 'page' | 'panel' }) {
     async (paths: string[]) => {
       if (selection.kind !== 'folder' || paths.length === 0) return;
       try {
+        // First video import: ffmpeg is needed for video covers + HEVC preview.
+        // If it isn't available yet, offer a one-click auto-download. The import
+        // proceeds either way (without ffmpeg, videos just lack cover/preview).
+        const hasVideo = paths.some((p) => typeFromPath(p) === 'video');
+        if (hasVideo) {
+          try {
+            const status = await invoke<{ available: boolean }>('ffmpeg_status');
+            if (!status.available) {
+              const yes = await ask(
+                '首次导入视频需要 ffmpeg 来生成封面并支持 HEVC/H.265 视频预览。是否现在自动下载？（约几十 MB，仅需一次）',
+                { title: '需要 ffmpeg', kind: 'info', okLabel: '自动下载', cancelLabel: '暂不' }
+              );
+              if (yes) {
+                try {
+                  await invoke<string>('download_ffmpeg');
+                  void message('ffmpeg 已就绪。', { title: '下载完成', kind: 'info' });
+                } catch (err) {
+                  console.error('download_ffmpeg failed', err);
+                  void message(
+                    '自动下载 ffmpeg 失败，视频将暂时缺少封面与 HEVC 预览。你可稍后重试导入。',
+                    { title: '下载失败', kind: 'warning' }
+                  );
+                }
+              }
+            }
+          } catch (err) {
+            console.error('ffmpeg_status check failed', err);
+          }
+        }
         // B2: track skipped duplicates to notify the user afterwards.
         const skipped: string[] = [];
         let imported = 0;

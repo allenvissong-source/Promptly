@@ -561,7 +561,7 @@ export default function MediaContent({
         >
           {activeTab === 'video' ? (
             <video
-              src={convertFileSrc(preview.path)}
+              src={convertFileSrc(preview.preview_path ?? preview.path)}
               className="max-w-[90vw] max-h-[90vh]"
               controls
               autoPlay

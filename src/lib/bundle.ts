@@ -317,6 +317,24 @@ async function materialize(
     projectId,
     sourcePath: staged,
   });
+  // Regenerate video cover/preview at the imported location (bundles don't ship
+  // sidecar files). Best-effort: import still succeeds without ffmpeg.
+  let thumb: string | null = m.type === 'image' ? newPath : null;
+  let previewPath: string | null = null;
+  if (m.type === 'video') {
+    try {
+      thumb = await invoke<string>('generate_thumbnail', { path: newPath });
+    } catch (err) {
+      console.error('generate_thumbnail failed for bundle media', err);
+    }
+    try {
+      previewPath = await invoke<string | null>('transcode_preview', {
+        path: newPath,
+      });
+    } catch (err) {
+      console.error('transcode_preview failed for bundle media', err);
+    }
+  }
   const newId = await insertMediaReturningId({
     project_id: projectId,
     type: m.type,
@@ -324,7 +342,8 @@ async function materialize(
     path: newPath,
     duration: m.duration,
     size: m.size,
-    thumb: m.type === 'image' ? newPath : null,
+    thumb,
+    preview_path: previewPath,
     hash: m.hash,
     scope,
     folder_id: folderId,

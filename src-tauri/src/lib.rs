@@ -267,46 +267,289 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
-// Probe a media file's duration via `ffprobe` if it is available on PATH.
-// Returns None when ffprobe is missing or the file has no readable duration,
-// so the caller can fall back to the '00:00' placeholder. This is the plan's
-// "优先用探测工具，无则降级" behavior: no heavy Rust A/V decoder is pulled in,
-// and a host without ffprobe simply keeps the placeholder.
-fn probe_duration(path: &str) -> Option<String> {
-    let output = std::process::Command::new("ffprobe")
-        .args([
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            path,
-        ])
+// ---------------------------------------------------------------------------
+// ffmpeg integration
+//
+// A single `ffmpeg` binary is the only external tool this app relies on. We
+// prefer an app-managed copy under <app_data>/bin (downloaded on demand via
+// the system `curl`, see `download_ffmpeg`) and fall back to any `ffmpeg` on
+// PATH. Everything — duration, codec detection, thumbnails, HEVC->H.264
+// preview transcode — is derived from that one binary; there is no separate
+// ffprobe dependency (duration/codec are parsed from `ffmpeg -i` stderr).
+// ---------------------------------------------------------------------------
+
+// Location of the app-managed ffmpeg binary, if it has been downloaded.
+fn ffmpeg_bin_path(app: &AppHandle) -> Option<PathBuf> {
+    let dir = app.path().app_data_dir().ok()?.join("bin");
+    let name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+    let p = dir.join(name);
+    if p.exists() { Some(p) } else { None }
+}
+
+// The ffmpeg command to invoke: the managed binary if present, else "ffmpeg"
+// from PATH.
+fn resolve_ffmpeg(app: &AppHandle) -> String {
+    if let Some(p) = ffmpeg_bin_path(app) {
+        return p.to_string_lossy().to_string();
+    }
+    "ffmpeg".to_string()
+}
+
+// Parse "Duration: HH:MM:SS.xx" from `ffmpeg -i` stderr. ffmpeg exits non-zero
+// when no output file is given, so we read stderr regardless of status. Returns
+// "mm:ss" (minutes may exceed 59 for long clips, matching prior behavior) or
+// None when the field is absent/unparseable.
+fn probe_duration_ffmpeg(ffmpeg: &str, path: &str) -> Option<String> {
+    let output = std::process::Command::new(ffmpeg)
+        .args(["-i", path])
         .output()
         .ok()?;
-    if !output.status.success() {
+    let text = String::from_utf8_lossy(&output.stderr);
+    let idx = text.find("Duration:")?;
+    let after = &text[idx + "Duration:".len()..];
+    let dur = after.trim_start().split(',').next()?.trim();
+    let parts: Vec<&str> = dur.split(':').collect();
+    if parts.len() != 3 {
         return None;
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    let secs: f64 = text.trim().parse().ok()?;
-    if !secs.is_finite() || secs < 0.0 {
+    let h: f64 = parts[0].trim().parse().ok()?;
+    let m: f64 = parts[1].trim().parse().ok()?;
+    let s: f64 = parts[2].trim().parse().ok()?;
+    if !(h.is_finite() && m.is_finite() && s.is_finite()) {
         return None;
     }
-    let total = secs.round() as u64;
+    let total = (h * 3600.0 + m * 60.0 + s).round() as u64;
     Some(format!("{:02}:{:02}", total / 60, total % 60))
+}
+
+// Parse the primary video codec (lowercase, e.g. "hevc", "h264") from the first
+// "Video:" stream line in `ffmpeg -i` stderr. None when there is no video track
+// or ffmpeg is unavailable.
+fn probe_video_codec(ffmpeg: &str, path: &str) -> Option<String> {
+    let output = std::process::Command::new(ffmpeg)
+        .args(["-i", path])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stderr);
+    for line in text.lines() {
+        if line.contains("Video:") {
+            let after = line.split("Video:").nth(1)?;
+            let codec = after
+                .trim()
+                .split(|c: char| c == ' ' || c == ',' || c == '(')
+                .next()?
+                .trim();
+            if !codec.is_empty() {
+                return Some(codec.to_lowercase());
+            }
+        }
+    }
+    None
 }
 
 // B3: extract file size (+ duration for non-image) for a stored media file.
 #[tauri::command]
-async fn probe_media_meta(path: String, kind: String) -> Result<MediaMeta, String> {
+async fn probe_media_meta(app: AppHandle, path: String, kind: String) -> Result<MediaMeta, String> {
     let size = std::fs::metadata(&path).ok().map(|m| human_size(m.len()));
     let duration = if kind == "image" {
         None
     } else {
-        probe_duration(&path)
+        let ffmpeg = resolve_ffmpeg(&app);
+        probe_duration_ffmpeg(&ffmpeg, &path)
     };
     Ok(MediaMeta { size, duration })
+}
+
+// Reported availability of ffmpeg to the frontend so it can decide whether to
+// offer the one-click download on first video import.
+#[derive(serde::Serialize)]
+struct FfmpegStatus {
+    available: bool,
+    path: Option<String>,
+    // true when it is the app-managed copy under <app_data>/bin.
+    managed: bool,
+}
+
+#[tauri::command]
+async fn ffmpeg_status(app: AppHandle) -> Result<FfmpegStatus, String> {
+    if let Some(p) = ffmpeg_bin_path(&app) {
+        return Ok(FfmpegStatus {
+            available: true,
+            path: Some(p.to_string_lossy().to_string()),
+            managed: true,
+        });
+    }
+    // Fall back to PATH: confirm by actually running `ffmpeg -version`.
+    let ok = std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    Ok(FfmpegStatus {
+        available: ok,
+        path: if ok { Some("ffmpeg".to_string()) } else { None },
+        managed: false,
+    })
+}
+
+// Download `url` to `dest` using the system curl (present on Win10+ and macOS).
+// No new Rust HTTP dependency is pulled in. Fails on HTTP error or a
+// suspiciously small result.
+fn download_url_to(url: &str, dest: &std::path::Path) -> Result<(), String> {
+    let status = std::process::Command::new("curl")
+        .args(["-sSL", "--fail", "--max-time", "900", "-o"])
+        .arg(dest)
+        .arg(url)
+        .status()
+        .map_err(|e| format!("curl spawn failed: {e}"))?;
+    if !status.success() {
+        return Err(format!("curl failed for {url}"));
+    }
+    let big_enough = std::fs::metadata(dest)
+        .map(|m| m.len() > 100_000)
+        .unwrap_or(false);
+    if !big_enough {
+        return Err(format!("downloaded file too small from {url}"));
+    }
+    Ok(())
+}
+
+// Find the ffmpeg executable inside a downloaded zip (BtbN/gyan.dev nest it
+// under <folder>/bin/ffmpeg.exe; the macOS builds ship a bare `ffmpeg`) and
+// extract just that one file to `dest_bin`.
+fn extract_ffmpeg_from_zip(
+    zip_path: &std::path::Path,
+    dest_bin: &std::path::Path,
+) -> Result<(), String> {
+    let file = std::fs::File::open(zip_path).map_err(|e| e.to_string())?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+    let want = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+    let mut found: Option<usize> = None;
+    for i in 0..archive.len() {
+        let f = archive.by_index(i).map_err(|e| e.to_string())?;
+        if f.is_dir() {
+            continue;
+        }
+        let name = f.name().replace('\\', "/");
+        let base = name.rsplit('/').next().unwrap_or("");
+        if base == want {
+            found = Some(i);
+            break;
+        }
+    }
+    let idx = found.ok_or("ffmpeg binary not found in archive")?;
+    let mut f = archive.by_index(idx).map_err(|e| e.to_string())?;
+    if let Some(parent) = dest_bin.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let mut out = std::fs::File::create(dest_bin).map_err(|e| e.to_string())?;
+    std::io::copy(&mut f, &mut out).map_err(|e| e.to_string())?;
+    drop(out);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(dest_bin)
+            .map_err(|e| e.to_string())?
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(dest_bin, perms).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+// One-click ffmpeg install: download a platform build and extract the binary to
+// <app_data>/bin. Tries a fallback chain of mirrors and returns the resolved
+// path. If a managed binary already exists it is returned as-is.
+#[tauri::command]
+async fn download_ffmpeg(app: AppHandle) -> Result<String, String> {
+    let bin_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("bin");
+    std::fs::create_dir_all(&bin_dir).map_err(|e| e.to_string())?;
+    let name = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+    let dest_bin = bin_dir.join(name);
+    if dest_bin.exists() {
+        return Ok(dest_bin.to_string_lossy().to_string());
+    }
+    let urls: Vec<&str> = if cfg!(windows) {
+        vec![
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+            "https://ghfast.top/https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
+            "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
+        ]
+    } else if cfg!(target_arch = "aarch64") {
+        vec!["https://ffmpeg.martin-riedl.de/redirect/latest/darwin/arm64/release/ffmpeg.zip"]
+    } else {
+        vec!["https://evermeet.cx/ffmpeg/getrelease/zip"]
+    };
+    let tmp_zip = bin_dir.join("ffmpeg_download.zip");
+    let mut last_err = String::from("no sources tried");
+    for url in urls {
+        let _ = std::fs::remove_file(&tmp_zip);
+        match download_url_to(url, &tmp_zip) {
+            Ok(()) => match extract_ffmpeg_from_zip(&tmp_zip, &dest_bin) {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(&tmp_zip);
+                    return Ok(dest_bin.to_string_lossy().to_string());
+                }
+                Err(e) => last_err = format!("extract from {url}: {e}"),
+            },
+            Err(e) => last_err = e,
+        }
+    }
+    let _ = std::fs::remove_file(&tmp_zip);
+    Err(format!("all ffmpeg sources failed. last error: {last_err}"))
+}
+
+// Extract the first frame of a video as a JPEG next to the source
+// (<path>.thumb.jpg) so the library grid can show a real cover instead of a
+// placeholder. Returns the thumbnail path.
+#[tauri::command]
+async fn generate_thumbnail(app: AppHandle, path: String) -> Result<String, String> {
+    let ffmpeg = resolve_ffmpeg(&app);
+    let out = format!("{path}.thumb.jpg");
+    let status = std::process::Command::new(&ffmpeg)
+        .args(["-y", "-ss", "0", "-i", &path, "-frames:v", "1", "-q:v", "3"])
+        .arg(&out)
+        .status()
+        .map_err(|e| format!("ffmpeg spawn failed: {e}"))?;
+    if !status.success() {
+        return Err("ffmpeg failed to extract thumbnail".to_string());
+    }
+    if !std::path::Path::new(&out).exists() {
+        return Err("thumbnail was not produced".to_string());
+    }
+    Ok(out)
+}
+
+// If (and only if) the video is HEVC/H.265 — which WebView2 cannot decode,
+// causing "audio only, no picture" — produce an H.264 copy next to the source
+// (<path>.preview.mp4) for in-app preview. The original file is untouched.
+// Returns Some(preview_path) when a copy was made, None when the source is
+// already WebView-compatible.
+#[tauri::command]
+async fn transcode_preview(app: AppHandle, path: String) -> Result<Option<String>, String> {
+    let ffmpeg = resolve_ffmpeg(&app);
+    let codec = probe_video_codec(&ffmpeg, &path).unwrap_or_default();
+    if codec != "hevc" && codec != "h265" {
+        return Ok(None);
+    }
+    let out = format!("{path}.preview.mp4");
+    let status = std::process::Command::new(&ffmpeg)
+        .args([
+            "-y", "-i", &path, "-c:v", "libx264", "-crf", "23", "-preset",
+            "veryfast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+        ])
+        .arg(&out)
+        .status()
+        .map_err(|e| format!("ffmpeg spawn failed: {e}"))?;
+    if !status.success() {
+        return Err("ffmpeg failed to transcode preview".to_string());
+    }
+    Ok(Some(out))
 }
 
 // B2: content hash of a file for import dedup. Streams the file through a
@@ -655,7 +898,11 @@ pub fn run() {
       file_hash,
             export_bundle,
             import_bundle,
-            cleanup_import_staging
+            cleanup_import_staging,
+            ffmpeg_status,
+            download_ffmpeg,
+            generate_thumbnail,
+            transcode_preview
     ])
     .setup(|app| {
       if cfg!(debug_assertions) {
