@@ -679,7 +679,7 @@ function TopBarInner() {
   return (
     <div
       onMouseDown={handleTitleBarMouseDown}
-      className="h-12 shrink-0 bg-[#1E1E1E] flex items-center justify-between gap-3 px-3 select-none overflow-x-hidden"
+      className="h-12 shrink-0 relative z-50 bg-[#1E1E1E] flex items-center justify-between gap-3 px-3 select-none"
     >
       <div className={`flex items-center gap-2 min-w-0 flex-1 ${IS_MAC ? 'pl-[72px]' : ''}`}>
         <AppLogo dotColor={view === 'home' ? '#E5E5E5' : dirty ? '#E0A458' : '#2EC4B6'} />
