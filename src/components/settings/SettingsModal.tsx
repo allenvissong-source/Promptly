@@ -85,6 +85,25 @@ async function pickDirectory(): Promise<string | null> {
   return typeof selected === 'string' ? selected : null;
 }
 
+// Where the ffmpeg in use came from, mirrored from the Rust `FfmpegStatus`.
+type FfmpegSource = 'bundled' | 'manual' | 'downloaded' | 'path' | 'none';
+
+interface FfmpegStatusInfo {
+  available: boolean;
+  path: string | null;
+  managed: boolean;
+  source: FfmpegSource;
+  version: string | null;
+}
+
+const FFMPEG_SOURCE_LABEL: Record<FfmpegSource, string> = {
+  bundled: '随应用内置',
+  manual: '手动指定',
+  downloaded: '早期版本下载',
+  path: '系统 PATH',
+  none: '未找到',
+};
+
 function ruleToDb(rule: DraftRule): Omit<ExportFormatRule, 'id' | 'created_at' | 'updated_at'> {
   return {
     name: rule.name.trim() || '未命名规则',
@@ -124,6 +143,8 @@ export default function SettingsModal({ open: isOpen, onClose }: SettingsModalPr
   const [renameValue, setRenameValue] = useState('');
   const [rules, setRules] = useState<DraftRule[]>([]);
   const [rulesLoading, setRulesLoading] = useState(false);
+  const [ffmpeg, setFfmpeg] = useState<FfmpegStatusInfo | null>(null);
+  const [ffmpegLoading, setFfmpegLoading] = useState(false);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -132,8 +153,38 @@ export default function SettingsModal({ open: isOpen, onClose }: SettingsModalPr
       setError(null);
       setSection('general');
       void refreshRules();
+      void refreshFfmpeg();
     });
   }, [isOpen]);
+
+  async function refreshFfmpeg() {
+    setFfmpegLoading(true);
+    try {
+      setFfmpeg(await invoke<FfmpegStatusInfo>('ffmpeg_status'));
+    } catch (err) {
+      setError(`读取 ffmpeg 状态失败：${err}`);
+    } finally {
+      setFfmpegLoading(false);
+    }
+  }
+
+  // Escape hatch for a broken/absent bundled sidecar: let the user point at
+  // their own ffmpeg. Rust validates it by running `-version` before saving.
+  async function chooseFfmpeg() {
+    const selected = await open({ directory: false, multiple: false });
+    if (typeof selected !== 'string') return;
+    await runAction('已更新 ffmpeg 路径', async () => {
+      await invoke('set_ffmpeg_override', { path: selected });
+      await refreshFfmpeg();
+    });
+  }
+
+  async function clearFfmpegOverride() {
+    await runAction('已恢复为内置 ffmpeg', async () => {
+      await invoke('set_ffmpeg_override', { path: null });
+      await refreshFfmpeg();
+    });
+  }
 
   async function refreshRules() {
     setRulesLoading(true);
@@ -393,6 +444,60 @@ export default function SettingsModal({ open: isOpen, onClose }: SettingsModalPr
                     className="h-4 w-4 accent-[#2EC4B6]"
                   />
                 </label>
+
+                <div className="rounded-xl border border-[#3D3D3D] bg-[#2A2A2A] p-4">
+                  <div className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className="text-[14px] font-medium text-[#E5E5E5]">视频处理</div>
+                      <div className="mt-1 text-[12px] text-[#8A8A8A]">
+                        用于生成视频封面、读取时长，以及为 HEVC/H.265 视频生成可预览副本。ffmpeg 已随应用内置，无需联网下载。
+                      </div>
+                    </div>
+                    <button onClick={() => void refreshFfmpeg()} disabled={ffmpegLoading} className="settings-action-btn shrink-0">
+                      <RefreshCw size={13} />重新检测
+                    </button>
+                  </div>
+
+                  <div className="mt-3 rounded-lg bg-[#1E1E1E] p-3 text-[12px]">
+                    {ffmpegLoading && !ffmpeg ? (
+                      <div className="text-[#8A8A8A]">检测中…</div>
+                    ) : ffmpeg ? (
+                      <>
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`inline-block h-2 w-2 shrink-0 rounded-full ${ffmpeg.available ? 'bg-[#2EC4B6]' : 'bg-[#E53935]'}`}
+                          />
+                          <span className={ffmpeg.available ? 'text-[#E5E5E5]' : 'text-[#FF8A80]'}>
+                            {ffmpeg.available ? '可用' : '不可用'}
+                          </span>
+                          <span className="text-[#8A8A8A]">·</span>
+                          <span className="text-[#BDBDBD]">{FFMPEG_SOURCE_LABEL[ffmpeg.source]}</span>
+                        </div>
+                        {ffmpeg.path && <div className="mt-1 break-all text-[#8A8A8A]">{ffmpeg.path}</div>}
+                        {ffmpeg.version && <div className="mt-1 break-all text-[#6F6F6F]">{ffmpeg.version}</div>}
+                        {!ffmpeg.available && (
+                          <div className="mt-2 text-[11px] text-[#FBBF24]">
+                            未找到可用的 ffmpeg，视频将缺少封面与 HEVC 预览（素材本身仍可正常导入）。可手动指定一个 ffmpeg 可执行文件，
+                            macOS 也可先执行 brew install ffmpeg 后重新检测。
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div className="text-[#8A8A8A]">尚未检测</div>
+                    )}
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <button onClick={() => void chooseFfmpeg()} disabled={busy} className="settings-action-btn">
+                      <FolderPlus size={13} />手动指定 ffmpeg
+                    </button>
+                    {ffmpeg?.source === 'manual' && (
+                      <button onClick={() => void clearFfmpegOverride()} disabled={busy} className="settings-action-btn">
+                        <RefreshCw size={13} />恢复内置
+                      </button>
+                    )}
+                  </div>
+                </div>
               </section>
             )}
 

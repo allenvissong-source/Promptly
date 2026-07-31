@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { open, message, ask } from '@tauri-apps/plugin-dialog';
+import { open, message } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebview } from '@tauri-apps/api/webview';
 import { useProject } from '../../context/ProjectContext';
@@ -57,6 +57,8 @@ export default function MediaLibraryView({ mode }: { mode: 'page' | 'panel' }) {
   const [filterExt, setFilterExt] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [dragOver, setDragOver] = useState(false);
+  // Show the "no usable ffmpeg" notice at most once per session.
+  const ffmpegWarnedRef = useRef(false);
 
   // Bump both the local reloadKey (refreshes this view's tree + content) and
   // the app-wide media revision (refreshes the gen-area @ image pools).
@@ -107,30 +109,26 @@ export default function MediaLibraryView({ mode }: { mode: 'page' | 'panel' }) {
     async (paths: string[]) => {
       if (selection.kind !== 'folder' || paths.length === 0 || activeStorageSpaceId == null) return;
       try {
-        // First video import: ffmpeg is needed for video covers + HEVC preview.
-        // If it isn't available yet, offer a one-click auto-download. The import
-        // proceeds either way (without ffmpeg, videos just lack cover/preview).
+        // ffmpeg ships bundled as a Tauri sidecar (see bundle.externalBin), so
+        // video covers / HEVC previews work offline out of the box and there is
+        // no download prompt on first video import any more.
+        //
+        // We only warn in the genuinely broken case: no bundled sidecar, no
+        // manual override, no ffmpeg on PATH. That means a repackaged or
+        // trimmed install; the import itself still succeeds, videos just lack a
+        // cover and HEVC preview. The notice is shown once per session so a
+        // batch import doesn't spam dialogs, and points at Settings where the
+        // user can select their own ffmpeg.
         const hasVideo = paths.some((p) => typeFromPath(p) === 'video');
-        if (hasVideo) {
+        if (hasVideo && !ffmpegWarnedRef.current) {
           try {
             const status = await invoke<{ available: boolean }>('ffmpeg_status');
             if (!status.available) {
-              const yes = await ask(
-                '首次导入视频需要 ffmpeg 来生成封面并支持 HEVC/H.265 视频预览。是否现在自动下载？（约几十 MB，仅需一次）',
-                { title: '需要 ffmpeg', kind: 'info', okLabel: '自动下载', cancelLabel: '暂不' }
+              ffmpegWarnedRef.current = true;
+              void message(
+                '未找到可用的 ffmpeg，本次导入的视频将缺少封面与 HEVC/H.265 预览（素材本身已正常导入）。可在「设置 → 常规 → 视频处理」中手动指定 ffmpeg 路径。',
+                { title: '视频封面不可用', kind: 'warning' }
               );
-              if (yes) {
-                try {
-                  await invoke<string>('download_ffmpeg');
-                  void message('ffmpeg 已就绪。', { title: '下载完成', kind: 'info' });
-                } catch (err) {
-                  console.error('download_ffmpeg failed', err);
-                  void message(
-                    '自动下载 ffmpeg 失败，视频将暂时缺少封面与 HEVC 预览。你可稍后重试导入。',
-                    { title: '下载失败', kind: 'warning' }
-                  );
-                }
-              }
             }
           } catch (err) {
             console.error('ffmpeg_status check failed', err);

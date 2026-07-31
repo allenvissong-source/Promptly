@@ -9,7 +9,10 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "tauri": "tauri",
+    "ffmpeg:fetch": "node tools/fetch-ffmpeg.mjs",
+    "pretauri:dev": "node tools/fetch-ffmpeg.mjs",
     "tauri:dev": "tauri dev",
+    "pretauri:build": "node tools/fetch-ffmpeg.mjs",
     "tauri:build": "tauri build"
   },
   "dependencies": {

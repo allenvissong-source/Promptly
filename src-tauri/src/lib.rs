@@ -806,34 +806,121 @@ fn human_size(bytes: u64) -> String {
 // ---------------------------------------------------------------------------
 // ffmpeg integration
 //
-// A single `ffmpeg` binary is the only external tool this app relies on. We
-// prefer an app-managed copy under <app_data>/bin (downloaded on demand via
-// the system `curl`, see `download_ffmpeg`) and fall back to any `ffmpeg` on
-// PATH. Everything — duration, codec detection, thumbnails, HEVC->H.264
-// preview transcode — is derived from that one binary; there is no separate
-// ffprobe dependency (duration/codec are parsed from `ffmpeg -i` stderr).
+// A single `ffmpeg` binary is the only external tool this app relies on.
+// Everything — duration, codec detection, thumbnails, HEVC->H.264 preview
+// transcode — is derived from that one binary; there is no separate ffprobe
+// dependency (duration/codec are parsed from `ffmpeg -i` stderr).
+//
+// Since it is bundled as a Tauri sidecar (`bundle.externalBin` in
+// tauri.conf.json ships `binaries/ffmpeg-<target-triple>` into the app), the
+// normal case needs no network access at all. `resolve_ffmpeg` still keeps a
+// fallback chain so the app degrades gracefully when the sidecar is missing
+// (dev runs before `npm run ffmpeg:fetch`, a user-trimmed bundle, corporate
+// repackaging, ...):
+//
+//   1. the bundled sidecar next to the executable  (normal case, offline)
+//   2. a user-chosen path saved via `set_ffmpeg_override`
+//   3. an app-managed copy under <app_data>/bin  (legacy `download_ffmpeg`)
+//   4. `ffmpeg` on PATH  (e.g. Homebrew)
 // ---------------------------------------------------------------------------
 
-// Location of the app-managed ffmpeg binary, if it has been downloaded.
-fn ffmpeg_bin_path(app: &AppHandle) -> Option<PathBuf> {
-    let dir = app.path().app_data_dir().ok()?.join("bin");
-    let name = if cfg!(windows) {
+// Platform executable name for the ffmpeg binary.
+fn ffmpeg_exe_name() -> &'static str {
+    if cfg!(windows) {
         "ffmpeg.exe"
     } else {
         "ffmpeg"
-    };
-    let p = dir.join(name);
-    if p.exists() {
+    }
+}
+
+// Location of the bundled sidecar. Tauri strips the `-<target-triple>` suffix at
+// bundle time and places the binary next to the main executable:
+//   macOS   <App>.app/Contents/MacOS/ffmpeg
+//   Windows <install dir>\ffmpeg.exe
+fn ffmpeg_sidecar_path() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let p = dir.join(ffmpeg_exe_name());
+    if p.is_file() {
+        return Some(p);
+    }
+    // `tauri dev` does not stage externalBin next to the debug binary, so in a
+    // debug build we also look at the source location the fetch script writes to
+    // (src-tauri/binaries/ffmpeg-<target-triple>). Without this, dev runs would
+    // behave differently from the shipped app and appear to have no ffmpeg.
+    #[cfg(debug_assertions)]
+    {
+        let staged = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("binaries")
+            .join(format!("ffmpeg-{}{}", env!("FFMPEG_TARGET_TRIPLE"), std::env::consts::EXE_SUFFIX));
+        if staged.is_file() {
+            return Some(staged);
+        }
+    }
+    None
+}
+
+// File holding a user-selected ffmpeg path, written by `set_ffmpeg_override`.
+fn ffmpeg_override_file(app: &AppHandle) -> Option<PathBuf> {
+    Some(app.path().app_data_dir().ok()?.join("ffmpeg-path.txt"))
+}
+
+// A user-selected ffmpeg path, if one was set and still exists.
+fn ffmpeg_override_path(app: &AppHandle) -> Option<PathBuf> {
+    let f = ffmpeg_override_file(app)?;
+    let raw = std::fs::read_to_string(f).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let p = PathBuf::from(trimmed);
+    if p.is_file() {
         Some(p)
     } else {
         None
     }
 }
 
-// The ffmpeg command to invoke: the managed binary if present, else "ffmpeg"
+// Location of the app-managed ffmpeg binary, if it has been downloaded by the
+// legacy in-app downloader.
+fn ffmpeg_bin_path(app: &AppHandle) -> Option<PathBuf> {
+    let dir = app.path().app_data_dir().ok()?.join("bin");
+    let p = dir.join(ffmpeg_exe_name());
+    if p.is_file() {
+        Some(p)
+    } else {
+        None
+    }
+}
+
+// Confirm a bare `ffmpeg` exists on PATH by actually running it.
+fn ffmpeg_on_path() -> bool {
+    std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+// Where a resolved ffmpeg came from, surfaced in settings so the user can tell
+// "bundled and working" apart from "falling back to your Homebrew install".
+fn ffmpeg_candidate(app: &AppHandle) -> (Option<PathBuf>, &'static str) {
+    if let Some(p) = ffmpeg_sidecar_path() {
+        return (Some(p), "bundled");
+    }
+    if let Some(p) = ffmpeg_override_path(app) {
+        return (Some(p), "manual");
+    }
+    if let Some(p) = ffmpeg_bin_path(app) {
+        return (Some(p), "downloaded");
+    }
+    (None, "none")
+}
+
+// The ffmpeg command to invoke: the first available candidate, else "ffmpeg"
 // from PATH.
 fn resolve_ffmpeg(app: &AppHandle) -> String {
-    if let Some(p) = ffmpeg_bin_path(app) {
+    if let (Some(p), _) = ffmpeg_candidate(app) {
         return p.to_string_lossy().to_string();
     }
     "ffmpeg".to_string()
@@ -904,36 +991,102 @@ async fn probe_media_meta(app: AppHandle, path: String, kind: String) -> Result<
     Ok(MediaMeta { size, duration })
 }
 
-// Reported availability of ffmpeg to the frontend so it can decide whether to
-// offer the one-click download on first video import.
+// Reported availability of ffmpeg to the frontend. With the sidecar bundled
+// this is normally `available: true, source: "bundled"`; the other sources only
+// appear when the bundled copy is missing.
 #[derive(serde::Serialize)]
 struct FfmpegStatus {
     available: bool,
     path: Option<String>,
     // true when it is the app-managed copy under <app_data>/bin.
     managed: bool,
+    // "bundled" | "manual" | "downloaded" | "path" | "none"
+    source: String,
+    // First line of `ffmpeg -version`, for display in settings. None when the
+    // binary could not be executed.
+    version: Option<String>,
+}
+
+// First line of `ffmpeg -version` for the given command, if it runs.
+fn ffmpeg_version_line(cmd: &str) -> Option<String> {
+    let out = std::process::Command::new(cmd)
+        .args(["-hide_banner", "-version"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines().next().map(|l| l.trim().to_string())
 }
 
 #[tauri::command]
 async fn ffmpeg_status(app: AppHandle) -> Result<FfmpegStatus, String> {
-    if let Some(p) = ffmpeg_bin_path(&app) {
+    let (candidate, source) = ffmpeg_candidate(&app);
+    if let Some(p) = candidate {
+        let cmd = p.to_string_lossy().to_string();
+        let version = ffmpeg_version_line(&cmd);
         return Ok(FfmpegStatus {
-            available: true,
-            path: Some(p.to_string_lossy().to_string()),
-            managed: true,
+            // A candidate that exists but refuses to run (wrong arch, quarantined,
+            // corrupted) must not be reported as available, otherwise the UI would
+            // claim everything is fine while covers silently fail.
+            available: version.is_some(),
+            path: Some(cmd),
+            managed: source == "downloaded",
+            source: source.to_string(),
+            version,
         });
     }
-    // Fall back to PATH: confirm by actually running `ffmpeg -version`.
-    let ok = std::process::Command::new("ffmpeg")
-        .arg("-version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    // Last resort: a bare `ffmpeg` on PATH (Homebrew, corporate image, ...).
+    if ffmpeg_on_path() {
+        return Ok(FfmpegStatus {
+            available: true,
+            path: Some("ffmpeg".to_string()),
+            managed: false,
+            source: "path".to_string(),
+            version: ffmpeg_version_line("ffmpeg"),
+        });
+    }
     Ok(FfmpegStatus {
-        available: ok,
-        path: if ok { Some("ffmpeg".to_string()) } else { None },
+        available: false,
+        path: None,
         managed: false,
+        source: "none".to_string(),
+        version: None,
     })
+}
+
+// Escape hatch when the bundled sidecar is unusable: let the user point at their
+// own ffmpeg (e.g. /opt/homebrew/bin/ffmpeg). The candidate is validated by
+// running `-version` before it is persisted, so a bad pick fails loudly here
+// instead of silently breaking covers later. Passing None clears the override.
+#[tauri::command]
+async fn set_ffmpeg_override(app: AppHandle, path: Option<String>) -> Result<(), String> {
+    let file = ffmpeg_override_file(&app).ok_or("cannot resolve app data dir")?;
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    match path {
+        None => {
+            let _ = std::fs::remove_file(&file);
+            Ok(())
+        }
+        Some(p) => {
+            let trimmed = p.trim().to_string();
+            if trimmed.is_empty() {
+                let _ = std::fs::remove_file(&file);
+                return Ok(());
+            }
+            if !std::path::Path::new(&trimmed).is_file() {
+                return Err(format!("文件不存在：{trimmed}"));
+            }
+            if ffmpeg_version_line(&trimmed).is_none() {
+                return Err("所选文件无法作为 ffmpeg 运行，请确认它是可执行的 ffmpeg 程序".to_string());
+            }
+            std::fs::write(&file, trimmed).map_err(|e| e.to_string())?;
+            Ok(())
+        }
+    }
 }
 
 // Download `url` to `dest` using the system curl (present on Win10+ and macOS).
@@ -967,11 +1120,7 @@ fn extract_ffmpeg_from_zip(
 ) -> Result<(), String> {
     let file = std::fs::File::open(zip_path).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
-    let want = if cfg!(windows) {
-        "ffmpeg.exe"
-    } else {
-        "ffmpeg"
-    };
+    let want = ffmpeg_exe_name();
     let mut found: Option<usize> = None;
     for i in 0..archive.len() {
         let f = archive.by_index(i).map_err(|e| e.to_string())?;
@@ -1005,9 +1154,11 @@ fn extract_ffmpeg_from_zip(
     Ok(())
 }
 
-// One-click ffmpeg install: download a platform build and extract the binary to
-// <app_data>/bin. Tries a fallback chain of mirrors and returns the resolved
-// path. If a managed binary already exists it is returned as-is.
+// Legacy escape hatch: download a platform build and extract the binary to
+// <app_data>/bin. No longer part of the normal flow — ffmpeg ships bundled — but
+// kept for the case where the sidecar is missing and the user has no local
+// ffmpeg. Tries a fallback chain of mirrors and returns the resolved path. If a
+// managed binary already exists it is returned as-is.
 #[tauri::command]
 async fn download_ffmpeg(app: AppHandle) -> Result<String, String> {
     let bin_dir = app
@@ -1016,12 +1167,7 @@ async fn download_ffmpeg(app: AppHandle) -> Result<String, String> {
         .map_err(|e| e.to_string())?
         .join("bin");
     std::fs::create_dir_all(&bin_dir).map_err(|e| e.to_string())?;
-    let name = if cfg!(windows) {
-        "ffmpeg.exe"
-    } else {
-        "ffmpeg"
-    };
-    let dest_bin = bin_dir.join(name);
+    let dest_bin = bin_dir.join(ffmpeg_exe_name());
     if dest_bin.exists() {
         return Ok(dest_bin.to_string_lossy().to_string());
     }
@@ -1031,10 +1177,26 @@ async fn download_ffmpeg(app: AppHandle) -> Result<String, String> {
             "https://ghfast.top/https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip",
             "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip",
         ]
+    } else if cfg!(target_os = "macos") {
+        // NOTE: the upstream host uses `macos/<arch>`, NOT `darwin/<arch>`.
+        // The old `darwin/arm64` URL was a hard 404, which is why every Apple
+        // Silicon user saw "自动下载 ffmpeg 失败" — it never had a working source.
+        if cfg!(target_arch = "aarch64") {
+            vec![
+                "https://ffmpeg.martin-riedl.de/redirect/latest/macos/arm64/release/ffmpeg.zip",
+                "https://www.osxexperts.net/ffmpeg81arm.zip",
+                "https://evermeet.cx/ffmpeg/getrelease/zip",
+            ]
+        } else {
+            vec![
+                "https://ffmpeg.martin-riedl.de/redirect/latest/macos/amd64/release/ffmpeg.zip",
+                "https://evermeet.cx/ffmpeg/getrelease/zip",
+            ]
+        }
     } else if cfg!(target_arch = "aarch64") {
-        vec!["https://ffmpeg.martin-riedl.de/redirect/latest/darwin/arm64/release/ffmpeg.zip"]
+        vec!["https://ffmpeg.martin-riedl.de/redirect/latest/linux/arm64/release/ffmpeg.zip"]
     } else {
-        vec!["https://evermeet.cx/ffmpeg/getrelease/zip"]
+        vec!["https://ffmpeg.martin-riedl.de/redirect/latest/linux/amd64/release/ffmpeg.zip"]
     };
     let tmp_zip = bin_dir.join("ffmpeg_download.zip");
     let mut last_err = String::from("no sources tried");
@@ -1553,6 +1715,7 @@ pub fn run() {
             import_bundle,
             cleanup_import_staging,
             ffmpeg_status,
+            set_ffmpeg_override,
             download_ffmpeg,
             generate_thumbnail,
             transcode_preview
