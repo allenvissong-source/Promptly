@@ -1,0 +1,337 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body, #root {
+    overflow-x: hidden;
+    margin: 0;
+    padding: 0;
+  }
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 240 10% 3.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 240 10% 3.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 240 10% 3.9%;
+    --primary: 240 5.9% 10%;
+    --primary-foreground: 0 0% 98%;
+    --secondary: 240 4.8% 95.9%;
+    --secondary-foreground: 240 5.9% 10%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+    --accent: 240 4.8% 95.9%;
+    --accent-foreground: 240 5.9% 10%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 5.9% 90%;
+    --input: 240 5.9% 90%;
+    --ring: 240 5.9% 10%;
+    --radius: 0.625rem;
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 240 5.3% 26.1%;
+    --sidebar-primary: 240 5.9% 10%;
+    --sidebar-primary-foreground: 0 0% 98%;
+    --sidebar-accent: 240 4.8% 95.9%;
+    --sidebar-accent-foreground: 240 5.9% 10%;
+    --sidebar-border: 220 13% 91%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+
+  .dark {
+    --background: 240 10% 3.9%;
+    --foreground: 0 0% 98%;
+    --card: 240 10% 3.9%;
+    --card-foreground: 0 0% 98%;
+    --popover: 240 10% 3.9%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 0 0% 98%;
+    --primary-foreground: 240 5.9% 10%;
+    --secondary: 240 3.7% 15.9%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 240 3.7% 15.9%;
+    --muted-foreground: 240 5% 64.9%;
+    --accent: 240 3.7% 15.9%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 240 3.7% 15.9%;
+    --input: 240 3.7% 15.9%;
+    --ring: 240 4.9% 83.9%;
+    --sidebar-background: 240 5.9% 10%;
+    --sidebar-foreground: 240 4.8% 95.9%;
+    --sidebar-primary: 224.3 76.3% 48%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 240 3.7% 15.9%;
+    --sidebar-accent-foreground: 240 4.8% 95.9%;
+    --sidebar-border: 240 3.7% 15.9%;
+    --sidebar-ring: 217.2 91.2% 59.8%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    font-family: 'Inter', 'Noto Sans SC', system-ui, -apple-system, sans-serif;
+    background-color: #1E1E1E;
+    color: #E5E5E5;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+  }
+  /* Kill native HTML5 element drag: dragging a media <img> would otherwise
+     start a browser image-drag and, on release, navigate the WebView to the
+     asset:// URL (showing the raw image full-bleed). The app uses its own
+     pointer-based drag channel (DragContext) instead. */
+  img,
+  a {
+    -webkit-user-drag: none;
+    user-select: none;
+  }
+  #root {
+    /* Use JS-synced real pixel size (see main.tsx). Falls back to 100vw/vh
+       for the very first paint before the vars are set. WKWebView lags on
+       100vh under the Tauri Overlay titlebar, so we must not rely on it. */
+    width: var(--app-w, 100vw);
+    height: var(--app-h, 100vh);
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    overscroll-behavior: none;
+  }
+}
+
+@layer utilities {
+  .scrollbar-dark {
+    scrollbar-width: thin;
+    scrollbar-color: #3D3D3D transparent;
+  }
+  .scrollbar-dark::-webkit-scrollbar {
+    width: 6px;
+  }
+  .scrollbar-dark::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .scrollbar-dark::-webkit-scrollbar-thumb {
+    background-color: #3D3D3D;
+    border-radius: 3px;
+  }
+  .scrollbar-dark::-webkit-scrollbar-thumb:hover {
+    background-color: #555555;
+  }
+
+  /* Hide scrollbar while keeping scroll functionality */
+  .hide-scrollbar {
+    -ms-overflow-style: none !important;
+    scrollbar-width: none !important;
+    overflow-y: hidden !important;
+  }
+  .hide-scrollbar::-webkit-scrollbar {
+    display: none !important;
+    width: 0 !important;
+    height: 0 !important;
+  }
+
+  /* Dark-theme checkbox matching the app palette. The checked color is driven
+     by the `--cbx` custom property (default teal), so a single style serves the
+     teal (组合模式), indigo (@模板 角色) and red (失效角色) variants. */
+  .checkbox-dark {
+    appearance: none;
+    -webkit-appearance: none;
+    width: 12px;
+    height: 12px;
+    flex-shrink: 0;
+    border: 1px solid #4A4A4A;
+    border-radius: 3px;
+    background-color: #2A2A2A;
+    cursor: pointer;
+    position: relative;
+    transition: background-color 0.12s, border-color 0.12s;
+  }
+  .checkbox-dark:hover {
+    border-color: var(--cbx, #2EC4B6);
+  }
+  .checkbox-dark:checked {
+    background-color: var(--cbx, #2EC4B6);
+    border-color: var(--cbx, #2EC4B6);
+  }
+  .checkbox-dark:checked::after {
+    content: '';
+    position: absolute;
+    left: 3.5px;
+    top: 1px;
+    width: 3px;
+    height: 6px;
+    border: solid #fff;
+    border-width: 0 1.5px 1.5px 0;
+    transform: rotate(45deg);
+  }
+}
+
+/* ============================================================
+   富文本格式工具条（分镜区顶部常驻条）+ 富文本渲染
+   ============================================================ */
+@layer components {
+  .fmt-toolbar {
+    background-color: #252525;
+  }
+
+  .fmt-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+    color: #B5B5B5;
+    background: transparent;
+    cursor: pointer;
+    transition: background-color 0.12s, color 0.12s;
+  }
+  .fmt-btn:hover:not(:disabled) {
+    background-color: #333333;
+    color: #E5E5E5;
+  }
+  .fmt-btn:disabled {
+    opacity: 0.4;
+    cursor: default;
+  }
+  .fmt-btn-active {
+    background-color: #2EC4B6;
+    color: #1E1E1E;
+  }
+  .fmt-btn-active:hover:not(:disabled) {
+    background-color: #25A99C;
+    color: #1E1E1E;
+  }
+
+  /* 文字颜色按钮：字母 A 下方一条当前色指示条 */
+  .fmt-color-a {
+    position: relative;
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    line-height: 0;
+  }
+  .fmt-color-bar {
+    display: block;
+    width: 14px;
+    height: 3px;
+    border-radius: 1px;
+    margin-top: 1px;
+  }
+
+  .fmt-sep {
+    width: 1px;
+    height: 16px;
+    margin: 0 4px;
+    background-color: #3D3D3D;
+  }
+
+  /* 颜色下拉色板 */
+  .fmt-palette {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    z-index: 9999;
+    padding: 8px;
+    border: 1px solid #3D3D3D;
+    border-radius: 10px;
+    background-color: #252525;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  }
+  .fmt-palette-row {
+    display: flex;
+    gap: 4px;
+  }
+  .fmt-palette-row + .fmt-palette-row {
+    margin-top: 4px;
+  }
+  .fmt-swatch {
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    cursor: pointer;
+    transition: transform 0.08s;
+  }
+  .fmt-swatch:hover {
+    transform: scale(1.12);
+  }
+  .fmt-swatch-sel {
+    outline: 2px solid #2EC4B6;
+    outline-offset: 1px;
+  }
+
+  /* 富文本渲染：确保加粗/斜体/下划线/删除线/着色在深色主题下可见。
+     行内 color / background-color 由粘贴保留的 span[style] 承载，天然生效；
+     这里主要防止 Tailwind preflight 把语义标签的样式重置掉。 */
+  .gen-prompt-editor strong {
+    font-weight: 700;
+  }
+  .gen-prompt-editor em {
+    font-style: italic;
+  }
+  .gen-prompt-editor u {
+    text-decoration: underline;
+  }
+  .gen-prompt-editor s {
+    text-decoration: line-through;
+  }
+}
+
+.settings-action-btn {
+  display: inline-flex;
+  height: 2rem;
+  align-items: center;
+  gap: 0.375rem;
+  border-radius: 0.5rem;
+  background: #1E1E1E;
+  padding: 0 0.75rem;
+  font-size: 12px;
+  color: #E5E5E5;
+  transition: background-color 0.15s ease, color 0.15s ease, opacity 0.15s ease;
+}
+.settings-action-btn:hover { background: #333333; }
+.settings-action-btn:disabled { cursor: default; opacity: 0.5; }
+.small-btn {
+  height: 1.75rem;
+  border-radius: 0.5rem;
+  background: #1E1E1E;
+  padding: 0 0.625rem;
+  font-size: 12px;
+  color: #BDBDBD;
+}
+.small-btn:hover { color: #E5E5E5; background: #333333; }
+.small-btn:disabled { cursor: default; opacity: 0.45; }
+.icon-btn {
+  display: inline-flex;
+  height: 1.75rem;
+  width: 1.75rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.5rem;
+  background: #1E1E1E;
+  color: #8A8A8A;
+}
+.icon-btn:hover { color: #E5E5E5; background: #333333; }
+.icon-btn:disabled { cursor: default; opacity: 0.45; }
+.settings-input {
+  height: 2rem;
+  border-radius: 0.5rem;
+  background: #1E1E1E;
+  padding: 0 0.75rem;
+  font-size: 12px;
+  color: #E5E5E5;
+  outline: none;
+  --tw-ring-color: #3D3D3D;
+  box-shadow: 0 0 0 1px var(--tw-ring-color) inset;
+}
+.settings-input:focus { --tw-ring-color: #2EC4B6; }
+.settings-input-error, .settings-input-error:focus { --tw-ring-color: #E53935; }
+.rule-toggle { display: inline-flex; align-items: center; gap: 0.375rem; }
+.rule-toggle input { accent-color: #2EC4B6; }

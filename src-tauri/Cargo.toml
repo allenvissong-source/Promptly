@@ -1,0 +1,53 @@
+[package]
+name = "app"
+version = "0.1.0"
+description = "A Tauri App"
+authors = ["you"]
+license = ""
+repository = ""
+edition = "2021"
+rust-version = "1.77.2"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+tauri = { version = "2.11.3", features = ["protocol-asset"] }
+tauri-plugin-log = "2"
+tauri-plugin-sql = { version = "2", features = ["sqlite"] }
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio"] }
+zip = { version = "4.2.0", default-features = false, features = ["deflate"] }
+sha2 = "0.10"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# macOS Overlay 标题栏在窗口几何变化(全屏/缩放/恢复/拖拽 resize)后会重置
+# titlebar inset 与交通灯位置(见 tauri #13044),导致自绘的顶部工具栏被顶出可视
+# 区、红绿灯压到内容上。用 objc2 在窗口事件后重申标题栏状态并复位交通灯。
+# 这些 crate 已作为 tauri/wry 的传递依赖存在,此处仅显式引用并按需开启 feature。
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = [
+  "NSResponder",
+  "NSView",
+  "NSWindow",
+  "NSControl",
+  "NSButton",
+  "NSPasteboard",
+] }
+objc2-foundation = { version = "0.3", features = ["NSGeometry"] }
+
+[target.'cfg(windows)'.dependencies]
+clipboard-win = "5"
+# Restore the DWM drop shadow that borderless windows (decorations: false)
+# lose on Windows; Win11's DWM rounds the corners automatically.
+window-shadows = "0.2"

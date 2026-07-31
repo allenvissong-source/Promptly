@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+dist-ssr/
+*.local
+
+# Tauri / Rust generated
+src-tauri/target/
+src-tauri/gen/
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Misc / local artifacts
+.claude/
+node.msi
+*Zone.Identifier
+video-prompt-engine-src.zip
+
+# Bundled ffmpeg sidecar binaries (fetched by tools/fetch-ffmpeg.mjs, ~65MB each)
+src-tauri/binaries/
+
+# Local packaging artifacts
+Promptly-source*/
+Promptly-source*.zip
+*.dmg
+.icons-backup-*.tgz
+.fix-backup/
+.tmp-*.bmp
+.tmp-*.png
