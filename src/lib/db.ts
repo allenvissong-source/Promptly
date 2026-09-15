@@ -7,11 +7,14 @@ import {
   buildFullWritePlan,
   buildIncrementalWritePlan,
   pickFields,
+  encodeSnapshotPayload,
+  decodeSnapshotPayload,
   type AreaTableSpec,
   type AreaFingerprint,
   type DesiredContainer,
   type SqlValue,
   type WritePlanStats,
+  type ProjectSnapshotPayload,
 } from './dbDiff';
 
 let db: Database | null = null;
@@ -120,7 +123,7 @@ export async function getDb(): Promise<Database> {
   return db;
 }
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 const DEFAULT_STORAGE_SPACE_NAME = '默认空间';
 const DEFAULT_STORAGE_ROOT_FALLBACK = 'app-data://uploads';
 const DEFAULT_FORMAT_RULE_PATTERN = String.raw`@(图|图片|视频|音频)\d+`;
@@ -285,6 +288,20 @@ async function migrateSchema(database: Database): Promise<void> {
     version = 6;
   }
 
+  // v7: 项目快照表。「还原到本次打开项目时的状态」需要一份整项目的完整序列化
+  // JSON，落到 project_snapshots.payload。纯新增表 + 新增索引，不动任何既有表 /
+  // 既有列，所以老库升级不会丢数据；新表为空时全部快照 API 都退化成「没有快照」。
+  if (version < 7) {
+    await executeBatch([
+      [
+        `CREATE TABLE IF NOT EXISTS project_snapshots (id INTEGER PRIMARY KEY AUTOINCREMENT, project_id INTEGER NOT NULL, created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, reason TEXT NOT NULL DEFAULT 'manual', schema_version INTEGER NOT NULL DEFAULT 0, payload TEXT NOT NULL)`,
+        [],
+      ],
+      ['CREATE INDEX IF NOT EXISTS idx_project_snapshots_project ON project_snapshots (project_id, id DESC)', []],
+      ['PRAGMA user_version = 7', []],
+    ]);
+    version = 7;
+  }
 }
 
 export async function initDb(): Promise<void> {
@@ -457,6 +474,7 @@ export async function deleteProject(id: number): Promise<void> {
   await database.execute('DELETE FROM media WHERE project_id = ?', [id]);
   await database.execute('DELETE FROM media_folders WHERE project_id = ?', [id]);
   // v7: 项目没了，它的历史快照也没有意义，顺手清掉避免库里留孤儿行。
+  await database.execute('DELETE FROM project_snapshots WHERE project_id = ?', [id]);
   await database.execute('DELETE FROM projects WHERE id = ?', [id]);
   // Remove the project's upload directory on the filesystem.
   try {
@@ -1406,3 +1424,225 @@ export async function clearProjectMedia(projectId: number): Promise<void> {
   }
 }
 
+// ============================================
+// 项目快照（project_snapshots，v7）
+//
+// 用途：给「还原到本次打开项目时的状态」提供存储与读写能力。这里只有数据层，
+// 不含 UI 与触发时机。快照内容 = exportProjectPayload 的返回值（与导出 zip 的
+// manifest 复用同一份序列化逻辑，避免两套逻辑漂移），外面包一层版本信息。
+//
+// 注意：快照表不参与项目 zip 导出 —— exportProjectPayload / bundle.ts 都不读
+// project_snapshots，所以导出的永远是项目本身，不会把历史快照打进包里。
+// ============================================
+
+// 默认只保留最近 5 份，防止库无限膨胀。
+export const DEFAULT_SNAPSHOT_KEEP = 5;
+
+// 为什么抓的这份快照。开放字符串，方便下一步的自动保存编排自行扩展。
+export type ProjectSnapshotReason =
+  | 'project_open'
+  | 'before_restore'
+  | 'before_auto_save'
+  | 'manual'
+  | (string & {});
+
+// 列表 / 元信息（不带 payload 正文，避免把几 MB JSON 拖进内存）。
+export interface ProjectSnapshotMeta {
+  id: number;
+  project_id: number;
+  created_at: string;
+  reason: string;
+  // 抓快照时的 DB schema 版本。
+  schema_version: number;
+  // payload 的字符长度，供 UI / 清理策略参考。
+  payload_bytes: number;
+}
+
+// 完整快照：元信息 + 已解析的 payload。
+export interface ProjectSnapshot extends ProjectSnapshotMeta {
+  payload: ProjectSnapshotPayload<ProjectExportPayload>;
+}
+
+const SNAPSHOT_META_COLUMNS =
+  'id, project_id, created_at, reason, schema_version, LENGTH(payload) AS payload_bytes';
+
+// 抓当前库里的项目状态存为一份快照。抓的是 DB 里已落盘的状态（不是内存态），
+// 所以调用方若想快照「包含未保存改动」，必须先保存再抓。
+export async function createProjectSnapshot(
+  projectId: number,
+  reason: ProjectSnapshotReason = 'manual'
+): Promise<ProjectSnapshotMeta> {
+  const database = await getDb();
+  const project = await exportProjectPayload(projectId, { fullProjectMedia: true });
+  const payload = encodeSnapshotPayload({ schemaVersion: SCHEMA_VERSION, project });
+  const result = await database.execute(
+    'INSERT INTO project_snapshots (project_id, reason, schema_version, payload) VALUES (?, ?, ?, ?)',
+    [projectId, reason, SCHEMA_VERSION, payload]
+  );
+  const rows = await database.select<ProjectSnapshotMeta[]>(
+    `SELECT ${SNAPSHOT_META_COLUMNS} FROM project_snapshots WHERE id = ?`,
+    [result.lastInsertId as number]
+  );
+  return rows[0];
+}
+
+// 最新一份在前。
+export async function listProjectSnapshots(projectId: number): Promise<ProjectSnapshotMeta[]> {
+  const database = await getDb();
+  return database.select<ProjectSnapshotMeta[]>(
+    `SELECT ${SNAPSHOT_META_COLUMNS} FROM project_snapshots WHERE project_id = ? ORDER BY id DESC`,
+    [projectId]
+  );
+}
+
+type ProjectSnapshotRow = ProjectSnapshotMeta & { payload: string };
+
+// payload 解不出（版本不认识 / JSON 损坏）时返回 null，而不是抛错或半解析：调用
+// 方一律当「这份快照不可用」处理。
+function toProjectSnapshot(row: ProjectSnapshotRow | undefined): ProjectSnapshot | null {
+  if (!row) return null;
+  const payload = decodeSnapshotPayload<ProjectExportPayload>(row.payload);
+  if (!payload) {
+    console.error(`Project snapshot ${row.id} has an unreadable payload; treating it as missing`);
+    return null;
+  }
+  const { payload: _payloadText, ...meta } = row;
+  void _payloadText;
+  return { ...meta, payload };
+}
+
+export async function getProjectSnapshot(snapshotId: number): Promise<ProjectSnapshot | null> {
+  const database = await getDb();
+  const rows = await database.select<ProjectSnapshotRow[]>(
+    `SELECT ${SNAPSHOT_META_COLUMNS}, payload FROM project_snapshots WHERE id = ?`,
+    [snapshotId]
+  );
+  return toProjectSnapshot(rows[0]);
+}
+
+export async function getLatestProjectSnapshot(projectId: number): Promise<ProjectSnapshot | null> {
+  const database = await getDb();
+  const rows = await database.select<ProjectSnapshotRow[]>(
+    `SELECT ${SNAPSHOT_META_COLUMNS}, payload FROM project_snapshots WHERE project_id = ? ORDER BY id DESC LIMIT 1`,
+    [projectId]
+  );
+  return toProjectSnapshot(rows[0]);
+}
+
+// 只保留最近 keepN 份，返回删掉的条数。keepN = 0 表示清空该项目的全部快照。
+export async function pruneProjectSnapshots(
+  projectId: number,
+  keepN: number = DEFAULT_SNAPSHOT_KEEP
+): Promise<number> {
+  const keep = Math.max(0, Math.floor(keepN));
+  const database = await getDb();
+  const result = await database.execute(
+    `DELETE FROM project_snapshots WHERE project_id = ? AND id NOT IN (
+       SELECT id FROM project_snapshots WHERE project_id = ? ORDER BY id DESC LIMIT ?
+     )`,
+    [projectId, projectId, keep]
+  );
+  return result.rowsAffected;
+}
+
+export async function deleteProjectSnapshot(snapshotId: number): Promise<void> {
+  await (await getDb()).execute('DELETE FROM project_snapshots WHERE id = ?', [snapshotId]);
+}
+
+export interface RestoreSnapshotOptions {
+  // 是否把项目名也还原回快照时的名字。默认 false：改名是首页级操作，还原三个区域
+  // 的内容不应该顺带把用户后来改的名字改回去。
+  restoreName?: boolean;
+}
+
+// 覆盖式还原：把快照里的三个区域（+ 面板布局，可选项目名）写回项目。
+//
+// 事务边界：所有写入语句（UPDATE projects + 三个区域各自的 DELETE 全部 +
+// 重新 INSERT）拼成 ONE executeBatch，也就是 ONE SQLite 事务。任一语句失败，
+// Rust 侧 rollback，库回到调用前的状态 —— 不存在「只还原了生图区」的半还原态。
+// 事务外的部分只有若干只读 SELECT（读快照行、读现存 media id），它们失败会在
+// 开始写之前抛错，库一个字节都没被改。
+//
+// 刻意不还原的东西：素材行（media / media_folders）与磁盘上的物理文件。文件系统
+// 操作没法跟着 SQLite 事务回滚，硬做会造成「库回滚了、文件没回滚」的更糟状态。
+// payload 里仍然保留素材元信息，将来要做更彻底的还原时可以用。因此，若快照之后
+// 有素材被删除，还原时会丢掉指向这些死素材的槽位行（与 bundle 导入同样的处理），
+// 卡片正文里对应的 @ chip 会变成悬空引用 —— 这一点必须在 UI 层提示。
+export async function restoreProjectSnapshot(
+  snapshotId: number,
+  opts?: RestoreSnapshotOptions
+): Promise<{ projectId: number; droppedSlots: number }> {
+  const database = await getDb();
+  const snapshot = await getProjectSnapshot(snapshotId);
+  if (!snapshot) throw new Error(`Snapshot ${snapshotId} is missing or unreadable`);
+  const projectId = snapshot.project_id;
+  const projects = await database.select<ProjectRecord[]>('SELECT id FROM projects WHERE id = ?', [projectId]);
+  if (!projects.length) throw new Error(`Project ${projectId} no longer exists`);
+  const project = snapshot.payload.project;
+
+  // 丢掉指向已不存在素材的槽位（库里没有这行 media，写回去只会得到坏缩略图）。
+  const liveMedia = new Set(
+    (await database.select<{ id: number }[]>('SELECT id FROM media')).map((row) => row.id)
+  );
+  let droppedSlots = 0;
+  const keepSlots = <T extends { media_id: number }>(slots: T[]): T[] =>
+    slots.filter((slot) => {
+      if (liveMedia.has(slot.media_id)) return true;
+      droppedSlots += 1;
+      return false;
+    });
+
+  const statements: BatchStatement[] = [];
+  statements.push(
+    opts?.restoreName
+      ? [
+          'UPDATE projects SET name = ?, panel_layout = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          [project.name, project.panelLayout ?? null, projectId],
+        ]
+      : [
+          'UPDATE projects SET panel_layout = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+          [project.panelLayout ?? null, projectId],
+        ]
+  );
+  statements.push(
+    ...buildFullWritePlan(
+      GEN_AREA_SPEC,
+      projectId,
+      genCellsToDesired(
+        (project.genCells ?? []).map((cell) => ({ id: cell.id, note: cell.note, slots: keepSlots(cell.slots) }))
+      )
+    ).statements
+  );
+  statements.push(
+    ...buildFullWritePlan(
+      TEMPLATE_AREA_SPEC,
+      projectId,
+      templatesToDesired(
+        (project.templates ?? []).map((template) => ({
+          id: template.id,
+          name: template.name,
+          content: template.content,
+          referenceable: template.referenceable,
+          includeTitle: template.includeTitle,
+          slots: keepSlots(template.slots),
+        }))
+      )
+    ).statements
+  );
+  statements.push(
+    ...buildFullWritePlan(
+      BLOCK_AREA_SPEC,
+      projectId,
+      blocksToDesired(
+        (project.blocks ?? []).map((block) => ({
+          id: block.id,
+          content: block.content,
+          combineEnabled: block.combineEnabled,
+          slots: keepSlots(block.slots),
+        }))
+      )
+    ).statements
+  );
+  await executeBatch(statements);
+  return { projectId, droppedSlots };
+}

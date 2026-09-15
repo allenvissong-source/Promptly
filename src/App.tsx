@@ -9,6 +9,7 @@ import { ActiveEditorProvider } from './context/ActiveEditorContext';
 import { GenStoreProvider, useGenStore } from './context/GenStoreContext';
 import { GenTemplateStoreProvider, useGenTemplateStore } from './context/GenTemplateStoreContext';
 import { BlockStoreProvider, useBlockStore } from './context/BlockStoreContext';
+import { AutoSaveProvider, useAutoSave } from './context/AutoSaveContext';
 import { HistoryProvider, useHistory } from './context/HistoryContext';
 import { MediaRevisionProvider } from './context/MediaRevisionContext';
 import {
@@ -401,17 +402,18 @@ function TopBarInner() {
     createProject,
     renameProject,
   } = useProject();
-  const { cells, dirty: genDirty, save: saveGen } = useGenStore();
-  const { templates, dirty: tplDirty, save: saveTpl } = useGenTemplateStore();
-  const { blocks, dirty: blkDirty, save: saveBlk } = useBlockStore();
+  const { cells, dirty: genDirty } = useGenStore();
+  const { templates, dirty: tplDirty } = useGenTemplateStore();
+  const { blocks, dirty: blkDirty } = useBlockStore();
   const genSettings = useGenSettings();
-  const { chipMode, activeStorageSpaceId, copyAsTableCell } = genSettings;
+  const { chipMode, activeStorageSpaceId, copyAsTableCell, applyReplaceOnExport, autoSaveEnabled } = genSettings;
   const exportFormatRules = exportFormatRulesFromSettings(genSettings);
   const { undo, redo } = useHistory();
   const dirty = genDirty || tplDirty || blkDirty;
-  const save = useCallback(async () => {
-    await Promise.all([saveGen(), saveTpl(), saveBlk()]);
-  }, [saveGen, saveTpl, saveBlk]);
+  // 自动保存编排层：Ctrl+S / 关窗前的「立即保存」，以及四态保存指示。
+  const { status: saveStatus, lastSavedAt, saveNow, openSnapshot, restoreOpenSnapshot, restoring } =
+    useAutoSave();
+  const save = saveNow;
 
   // A5: 复制全部 — merge every 生图/模板/分镜 card into one plain-text blob
   // (current chipMode) and write it to the clipboard. Blocks resolve their
@@ -453,10 +455,11 @@ function TopBarInner() {
     const result = await copyRichText(serialized.plainText, exportFormatRules, { 
       tableCell: copyAsTableCell,
       initialStyles: serialized.styles,
+      applyReplace: applyReplaceOnExport,
     });
     setCopiedAll(result.status);
     setTimeout(() => setCopiedAll(null), 1500);
-  }, [cells, templates, blocks, chipMode, resolveTemplateRef, exportFormatRules, copyAsTableCell]);
+  }, [cells, templates, blocks, chipMode, resolveTemplateRef, exportFormatRules, copyAsTableCell, applyReplaceOnExport]);
 
   // Export the active project to a single self-contained .zip. `fullMedia`
   // controls the material scope: false = 仅打包被引用的素材 (default), true =
@@ -505,12 +508,43 @@ function TopBarInner() {
     [activeProjectId, projects]
   );
 
+  // P1 还原入口：回到「本次打开该项目时」的那份快照（reason='open'）。
+  // 二次确认沿用项目里既有的 Tauri confirm 写法（与关窗确认、删除素材同款）。
+  const handleRestoreOpenSnapshot = useCallback(async () => {
+    setExportMenuOpen(false);
+    if (openSnapshot == null || restoring) return;
+    const ok = await confirm(
+      '还原到本次打开该项目时的状态？本次打开后的全部改动都会丢失（包括已经自动保存的部分），项目名也会一起还原。',
+      { title: '还原确认', kind: 'warning' }
+    );
+    if (!ok) return;
+    try {
+      const result = await restoreOpenSnapshot();
+      if (!result) return;
+      // 还原不恢复素材行与磁盘文件：指向已删素材的槽位会被丢掉，必须明确告知。
+      if (result.droppedSlots > 0) {
+        await message(
+          `已还原到本次打开时的状态。有 ${result.droppedSlots} 个图片槽位因素材已被删除而丢弃，卡片正文里对应的 @ 引用会显示为已删除。`,
+          { title: 'Promptly', kind: 'warning' }
+        );
+      } else {
+        await message('已还原到本次打开时的状态。', { title: 'Promptly', kind: 'info' });
+      }
+    } catch (err) {
+      console.error('Restore snapshot failed', err);
+      await message(`还原失败：${err}`, { title: 'Promptly', kind: 'error' });
+    }
+  }, [openSnapshot, restoring, restoreOpenSnapshot]);
+
   // A3: unsaved-changes guard. Keep the latest dirty/save in refs so the
   // window-close listener (registered once) always sees current values.
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
   const saveRef = useRef(save);
   saveRef.current = save;
+  // 自动保存开关也要用 ref：关窗监听只注册一次，必须读到最新的设置值。
+  const autoSaveEnabledRef = useRef(autoSaveEnabled);
+  autoSaveEnabledRef.current = autoSaveEnabled;
   // Keep undo/redo in refs so the single keydown listener (registered once)
   // always calls the current handlers without re-subscribing.
   const undoRef = useRef(undo);
@@ -521,11 +555,40 @@ function TopBarInner() {
   const tabsRef = useRef<HTMLDivElement>(null);
 
   // Route the custom close button + the OS close request (Alt+F4 / taskbar)
-  // through one confirm flow: when there are unsaved changes, ask before
-  // closing; `destroy()` bypasses the onCloseRequested guard to actually exit.
+  // through one flow. 自动保存开启：flush（await 落库）完成后直接关，不再二次确认。
+  // 自动保存关闭：保留原有的「有未保存的修改」二次确认弹窗。
+  // flush 失败（写库真的报错）时退回二次确认，绝不静默丢数据。
   const requestClose = useCallback(async () => {
     const win = getCurrentWindow();
     if (closingRef.current) return;
+    // 自动保存开启：无条件走一次 saveNow —— 它内部用状态机的同步 ref 判断脏位，
+    // 无脏就直接返回 true（不写库），比这里读可能滞后一帧的 React dirty 更可靠。
+    if (autoSaveEnabledRef.current) {
+      let flushed = false;
+      try {
+        // saveNow 返回「已经没有未落库的改动」，由状态机 ref 同步得出，
+        // 不依赖 React 重渲染，所以这里可以直接信。
+        flushed = await saveRef.current();
+      } catch (err) {
+        console.error('Flush before close failed', err);
+        flushed = false;
+      }
+      if (flushed) {
+        closingRef.current = true;
+        await win.destroy();
+        return;
+      }
+      // 只有「真的没存上」才退回确认弹窗，绝不静默丢数据。
+      const ok = await confirm('自动保存未能写入本次修改，确定仍要关闭吗？未保存的内容将丢失。', {
+        title: '关闭确认',
+        kind: 'warning',
+      });
+      if (ok) {
+        closingRef.current = true;
+        await win.destroy();
+      }
+      return;
+    }
     if (!dirtyRef.current) {
       closingRef.current = true;
       await win.destroy();
@@ -564,8 +627,8 @@ function TopBarInner() {
   // B7: single global Ctrl+S / Cmd+S handler. Previously each of the three
   // stores (gen / template / block) registered its own window keydown listener,
   // so one press fired three times and each store ran a full DELETE+reinsert.
-  // Now there is exactly ONE handler here; it calls the combined save() (via
-  // saveRef to avoid stale closures) which fans out to all three stores.
+  // Now there is exactly ONE handler here. 语义变为「立即保存」：走自动保存编排层
+  // 的 saveNow（跳过防抖、串行 await 三个 store 的 save()，仍是 3 个独立事务）。
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
@@ -622,17 +685,52 @@ function TopBarInner() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  // Guard a Web/WebView reload (Ctrl+R / F5): the native beforeunload prompt.
+  // Guard a Web/WebView reload (Ctrl+R / F5). 自动保存开启时不再拦（触发一次
+  // flush 就放行，最多丢掉最后一个防抖窗口内的输入）；关闭时保留原有的
+  // beforeunload 二次确认。beforeunload 里没法 await，所以只能 fire-and-forget。
   useEffect(() => {
     const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (dirtyRef.current) {
-        e.preventDefault();
-        e.returnValue = '';
+      if (!dirtyRef.current) return;
+      if (autoSaveEnabledRef.current) {
+        void saveRef.current();
+        return;
       }
+      e.preventDefault();
+      e.returnValue = '';
     };
     window.addEventListener('beforeunload', onBeforeUnload);
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
   }, []);
+
+  // 保存状态四态。沿用原来的「logo 圆点变色」位置与配色（青绿=已保存、
+  // 琥珀=未保存），只是把「保存中 / 保存失败」补进同一套色板，并在旁边加一行
+  // 与既有菜单说明同款的 11px 小字。
+  const saveDotColor =
+    view === 'home'
+      ? '#E5E5E5'
+      : saveStatus === 'error'
+        ? '#E53935'
+        : saveStatus === 'saving'
+          ? '#8A8A8A'
+          : dirty
+            ? '#E0A458'
+            : '#2EC4B6';
+  const savedClock =
+    lastSavedAt == null
+      ? ''
+      : `${String(new Date(lastSavedAt).getHours()).padStart(2, '0')}:${String(
+          new Date(lastSavedAt).getMinutes()
+        ).padStart(2, '0')}`;
+  const saveLabel =
+    saveStatus === 'saving'
+      ? '保存中…'
+      : saveStatus === 'error'
+        ? '保存失败'
+        : dirty
+          ? '未保存'
+          : lastSavedAt != null
+            ? `已保存 ${savedClock}`
+            : '';
 
   const [editingId, setEditingId] = useState<number | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -684,7 +782,20 @@ function TopBarInner() {
       className="h-12 shrink-0 relative z-50 bg-[#1E1E1E] flex items-center justify-between gap-3 px-3 select-none"
     >
       <div className={`flex items-center gap-2 min-w-0 flex-1 ${IS_MAC ? 'pl-[72px]' : ''}`}>
-        <AppLogo dotColor={view === 'home' ? '#E5E5E5' : dirty ? '#E0A458' : '#2EC4B6'} />
+        <AppLogo dotColor={saveDotColor} />
+        {view === 'project' && saveLabel ? (
+          <span
+            title={
+              saveStatus === 'error'
+                ? '自动保存失败，已保留未保存标记，稍后会自动重试；也可按 Ctrl+S 立即重试'
+                : '自动保存状态（可在设置 → 自动保存里调整）'
+            }
+            className="text-[11px] whitespace-nowrap shrink-0"
+            style={{ color: saveDotColor }}
+          >
+            {saveLabel}
+          </span>
+        ) : null}
 
         <button
           onClick={goHome}
@@ -822,6 +933,24 @@ function TopBarInner() {
                   本项目全部素材
                   <div className="text-[11px] text-[#8A8A8A]">打包本项目素材库全部素材</div>
                 </button>
+                <div className="my-1 h-px bg-[#3D3D3D]" />
+                <button
+                  onClick={() => void handleRestoreOpenSnapshot()}
+                  disabled={openSnapshot == null || restoring}
+                  title={
+                    openSnapshot == null
+                      ? '本次打开没有可用快照（空项目不抓快照）'
+                      : '回到本次打开该项目时的状态'
+                  }
+                  className={`w-full text-left px-3 py-2 text-[12px] ${
+                    openSnapshot == null || restoring
+                      ? 'text-[#666666] cursor-default'
+                      : 'text-[#E5E5E5] hover:bg-[#333333] cursor-pointer'
+                  }`}
+                >
+                  {restoring ? '还原中…' : '还原到本次打开时的状态'}
+                  <div className="text-[11px] text-[#8A8A8A]">会丢弃本次打开后的全部改动</div>
+                </button>
               </div>
             )}
           </div>
@@ -835,7 +964,8 @@ function TopBarInner() {
 
 // Panel visibility chooser (project view only). Toggles which of the 4 big
 // panels show; the last remaining panel's toggle is locked so you can never
-// close everything. "还原默认布局" resets both visibility and drag sizes.
+// close everything. 之后两项「图片区域 / 文字区域」控制卡片内部左右两列，不受
+// 「至少保留一个面板」的锁约束。"还原默认布局" resets both visibility and drag sizes.
 function PanelMenu() {
   const { visible, togglePanel, toggleCardColumn, isLastVisible, resetLayout } =
     usePanelLayout();
@@ -1028,11 +1158,13 @@ function App() {
               <GenStoreProvider>
                 <GenTemplateStoreProvider>
                   <BlockStoreProvider>
-                    <PanelLayoutProvider>
-                      <ActiveEditorProvider>
-                        <AppShell />
-                      </ActiveEditorProvider>
-                    </PanelLayoutProvider>
+                    <AutoSaveProvider>
+                      <PanelLayoutProvider>
+                        <ActiveEditorProvider>
+                          <AppShell />
+                        </ActiveEditorProvider>
+                      </PanelLayoutProvider>
+                    </AutoSaveProvider>
                   </BlockStoreProvider>
                 </GenTemplateStoreProvider>
               </GenStoreProvider>

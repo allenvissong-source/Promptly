@@ -168,8 +168,13 @@ export function serializePromptContent(
     const after = trimLeading(renderInline(children.slice(tIdx + 1)));
 
     if (!resolved) {
-      // Template gone: merge 前文 + 后文 into one line.
-      outLines.push(trimLine(concatLines(before, after)));
+      // Template gone (either 仅本卡 copy without a resolver, or a dangling ref):
+      // merge 前文 + 后文 into one line. When the chip was the only thing on the
+      // line, that merge yields an empty string — drop the line entirely instead
+      // of emitting a blank one, otherwise every skipped chip leaves a hole.
+      // 用户自己敲的空行走的是上面 tIdx < 0 的分支，不受影响。
+      const merged = trimLine(concatLines(before, after));
+      if (merged.text.length > 0) outLines.push(merged);
       continue;
     }
 

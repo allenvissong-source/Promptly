@@ -33,7 +33,10 @@ export interface GenTemplateData {
 interface GenTemplateStoreValue {
   templates: GenTemplateData[];
   dirty: boolean;
-  save: () => Promise<void>;
+  // 见 GenStoreContext：内存里这份 templates 是从哪个项目 hydrate 出来的。
+  hydratedProjectId: number | null;
+  save: (expectProjectId?: number) => Promise<void>;
+  markSaved: () => void;
   addTemplate: () => void;
   deleteTemplate: (id: string) => void;
   // Duplicate a template (name + " 副本", copied content/flags/images with fresh
@@ -86,9 +89,13 @@ export function GenTemplateStoreProvider({ children }: { children: ReactNode }) 
   const [templates, setTemplates] = useState<GenTemplateData[]>([]);
   const [dirty, setDirty] = useState(false);
 
-  // Manual save only, same rationale as GenStore: hydration gates dirty via
-  // readyRef; templatesRef feeds the keyboard handler without stale closures.
-  const readyRef = useRef(false);
+  // 与 GenStore 同构：hydratedForRef 记住「hydrate 完成的是哪个项目」，既当
+  // dirty 门闸，也当 save() 的写入目标（绝不用 activeProjectId）。
+  const hydratedForRef = useRef<number | null>(null);
+  const [hydratedProjectId, setHydratedProjectId] = useState<number | null>(null);
+  // 见 GenStoreContext：hydrate 自己写进来的那份数组，用来把「hydrate 结束后必然
+  // 跑一次的 dirty 效果」认出来，避免每次打开项目都被当成用户改动。
+  const hydratedTemplatesRef = useRef<GenTemplateData[] | null>(null);
   const templatesRef = useRef(templates);
   templatesRef.current = templates;
 
@@ -100,13 +107,15 @@ export function GenTemplateStoreProvider({ children }: { children: ReactNode }) 
     });
   }, [register]);
 
-  // Hydrate on project switch. Unsaved changes in the outgoing project are
-  // discarded — the trade-off of manual save.
+  // Hydrate on project switch. 切项目前由 AutoSaveContext 先 flush（用旧 projectId）。
   useEffect(() => {
-    readyRef.current = false;
+    hydratedForRef.current = null;
+    setHydratedProjectId(null);
     setDirty(false);
     if (activeProjectId == null) {
-      setTemplates([]);
+      const empty: GenTemplateData[] = [];
+      hydratedTemplatesRef.current = empty;
+      setTemplates(empty);
       return;
     }
     const pid = activeProjectId;
@@ -115,29 +124,37 @@ export function GenTemplateStoreProvider({ children }: { children: ReactNode }) 
       try {
         const loaded = await loadTemplates(pid);
         if (cancelled) return;
-        setTemplates(
-          loaded.map((t) => ({
-            id: t.id,
-            name: t.name,
-            content: t.content ? (JSON.parse(t.content) as JSONContent) : null,
-            referenceable: t.referenceable,
-            includeTitle: t.includeTitle,
-            images: t.slots.map((s) => ({
-              id: s.id,
-              mediaId: s.media_id,
-              name: s.name,
-              thumb: s.thumb ?? '',
-              path: s.path ?? '',
-              meta: s.meta ?? '',
-              type: s.type,
-            })),
-          }))
-        );
+        const hydrated: GenTemplateData[] = loaded.map((t) => ({
+          id: t.id,
+          name: t.name,
+          content: t.content ? (JSON.parse(t.content) as JSONContent) : null,
+          referenceable: t.referenceable,
+          includeTitle: t.includeTitle,
+          images: t.slots.map((s) => ({
+            id: s.id,
+            mediaId: s.media_id,
+            name: s.name,
+            thumb: s.thumb ?? '',
+            path: s.path ?? '',
+            meta: s.meta ?? '',
+            type: s.type,
+          })),
+        }));
+        hydratedTemplatesRef.current = hydrated;
+        setTemplates(hydrated);
       } catch (err) {
         console.error('Failed to load templates', err);
-        if (!cancelled) setTemplates([]);
+        if (!cancelled) {
+          const empty: GenTemplateData[] = [];
+          hydratedTemplatesRef.current = empty;
+          setTemplates(empty);
+        }
       } finally {
-        if (!cancelled) readyRef.current = true;
+        // cancelled 说明项目又切走了：不开门闸，避免旧内存被当成新项目的内容写回。
+        if (!cancelled) {
+          hydratedForRef.current = pid;
+          setHydratedProjectId(pid);
+        }
       }
     })();
     return () => {
@@ -147,13 +164,19 @@ export function GenTemplateStoreProvider({ children }: { children: ReactNode }) 
 
   // Any post-hydration change marks templates dirty (unsaved).
   useEffect(() => {
-    if (!readyRef.current) return;
+    if (hydratedForRef.current == null) return;
+    // hydrate 刚写进来的那份数据不算用户改动（无脏不写）。
+    if (hydratedTemplatesRef.current === templates) return;
     setDirty(true);
   }, [templates]);
 
-  const save = useCallback(async () => {
-    if (activeProjectId == null) return;
-    const pid = activeProjectId;
+  const markSaved = useCallback(() => setDirty(false), []);
+
+  const save = useCallback(async (expectProjectId?: number) => {
+    const pid = hydratedForRef.current;
+    // ⚠️ hydrate 未完成 / 串项目：拒绝写。
+    if (pid == null) return;
+    if (expectProjectId != null && expectProjectId !== pid) return;
     try {
       await saveTemplates(
         pid,
@@ -176,9 +199,11 @@ export function GenTemplateStoreProvider({ children }: { children: ReactNode }) 
       );
       setDirty(false);
     } catch (err) {
+      // 失败向上抛（保留日志），由编排层显示「保存失败」并保持 dirty=true。
       console.error('Failed to save templates', err);
+      throw err;
     }
-  }, [activeProjectId]);
+  }, []);
 
   // B7: Ctrl+S is handled by ONE global handler in App's top bar (which calls
   // the combined save across all stores). The per-store handler was removed so
@@ -358,7 +383,9 @@ export function GenTemplateStoreProvider({ children }: { children: ReactNode }) 
       value={{
         templates,
         dirty,
+        hydratedProjectId,
         save,
+        markSaved,
         addTemplate,
         deleteTemplate,
         duplicateTemplate,

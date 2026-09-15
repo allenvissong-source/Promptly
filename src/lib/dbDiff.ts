@@ -320,3 +320,55 @@ export function buildIncrementalWritePlan(
   return { statements, stats, full: false, reason: null };
 }
 
+// ============================================================================
+// 项目快照 payload（v7 project_snapshots.payload 的文本格式）
+//
+// 内容就是 db.exportProjectPayload 的返回值（和导出 zip 里 manifest 用的是同一
+// 份序列化逻辑），外面包一层版本号 / 抓取时间 / 当时的 schema 版本。这里只放纯
+// 编解码，方便单测；DB 读写在 db.ts。
+// ============================================================================
+
+export const SNAPSHOT_PAYLOAD_VERSION = 1;
+
+export interface ProjectSnapshotPayload<TProject = unknown> {
+  snapshotVersion: number;
+  capturedAt: number;
+  // 抓快照时的 DB schema 版本，将来做跨版本还原时用来判断要不要升级 payload。
+  schemaVersion: number;
+  project: TProject;
+}
+
+export function encodeSnapshotPayload<TProject>(input: {
+  schemaVersion: number;
+  project: TProject;
+  capturedAt?: number;
+}): string {
+  const payload: ProjectSnapshotPayload<TProject> = {
+    snapshotVersion: SNAPSHOT_PAYLOAD_VERSION,
+    capturedAt: input.capturedAt ?? Date.now(),
+    schemaVersion: input.schemaVersion,
+    project: input.project,
+  };
+  return JSON.stringify(payload);
+}
+
+// 解不出 / 版本不认识 / 缺 project 字段 -> null（调用方当「这份快照不可用」，
+// 绝不半解析着往库里写）。
+export function decodeSnapshotPayload<TProject>(text: string): ProjectSnapshotPayload<TProject> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+  const candidate = parsed as Partial<ProjectSnapshotPayload<TProject>>;
+  if (candidate.snapshotVersion !== SNAPSHOT_PAYLOAD_VERSION) return null;
+  if (!candidate.project || typeof candidate.project !== 'object') return null;
+  return {
+    snapshotVersion: candidate.snapshotVersion,
+    capturedAt: typeof candidate.capturedAt === 'number' ? candidate.capturedAt : 0,
+    schemaVersion: typeof candidate.schemaVersion === 'number' ? candidate.schemaVersion : 0,
+    project: candidate.project as TProject,
+  };
+}

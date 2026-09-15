@@ -25,7 +25,21 @@ const CHIP_MODE_KEY = 'promptly.chipMode';
 const SHOW_FORMAT_TOOLBAR_KEY = 'promptly.showFormatToolbar';
 const COPY_AS_TABLE_CELL_KEY = 'promptly.copyAsTableCell';
 const APPLY_REPLACE_ON_EXPORT_KEY = 'promptly.applyReplaceOnExport';
+const AUTO_SAVE_ENABLED_KEY = 'promptly.autoSaveEnabled';
+const AUTO_SAVE_INTERVAL_KEY = 'promptly.autoSaveIntervalMs';
 
+// 自动保存的空闲防抖档位：设置里只给这两档，避免用户填出 50ms 这种自残值。
+export const AUTO_SAVE_INTERVAL_OPTIONS = [1500, 5000] as const;
+export type AutoSaveIntervalMs = (typeof AUTO_SAVE_INTERVAL_OPTIONS)[number];
+const AUTO_SAVE_INTERVAL_DEFAULT: AutoSaveIntervalMs = 1500;
+
+function parseAutoSaveInterval(
+  value: string | null,
+  fallback: AutoSaveIntervalMs
+): AutoSaveIntervalMs {
+  const n = Number(value);
+  return AUTO_SAVE_INTERVAL_OPTIONS.find((opt) => opt === n) ?? fallback;
+}
 
 function readInitialChipMode(): ChipMode {
   try {
@@ -70,7 +84,28 @@ function readInitialApplyReplaceOnExport(): boolean {
   return true;
 }
 
+function readInitialAutoSaveEnabled(): boolean {
+  try {
+    const v = localStorage.getItem(AUTO_SAVE_ENABLED_KEY);
+    if (v === '0') return false;
+    if (v === '1') return true;
+  } catch {
+    // localStorage unavailable — fall back to default (on).
+  }
+  return true;
+}
 
+function readInitialAutoSaveInterval(): AutoSaveIntervalMs {
+  try {
+    return parseAutoSaveInterval(
+      localStorage.getItem(AUTO_SAVE_INTERVAL_KEY),
+      AUTO_SAVE_INTERVAL_DEFAULT
+    );
+  } catch {
+    // localStorage unavailable — fall back to default (1.5s).
+  }
+  return AUTO_SAVE_INTERVAL_DEFAULT;
+}
 
 function parseChipMode(value: string | null, fallback: ChipMode): ChipMode {
   return value === 'code' || value === 'name' ? value : fallback;
@@ -116,8 +151,13 @@ interface GenSettingsValue {
   // 为 replace 的规则）。默认开启；关掉后复制结果与旧版本完全一致。
   applyReplaceOnExport: boolean;
   setApplyReplaceOnExport: (v: boolean) => void;
+  // 自动保存总开关（默认开）。关掉后调度器不再自发落库，只剩 Ctrl+S 手动保存，
   // 关窗时也回到「有未保存修改」的二次确认弹窗。
+  autoSaveEnabled: boolean;
+  setAutoSaveEnabled: (v: boolean) => void;
   // 空闲防抖间隔：停止编辑多久后落库（1.5 秒 / 5 秒，默认 1.5 秒）。
+  autoSaveIntervalMs: AutoSaveIntervalMs;
+  setAutoSaveIntervalMs: (v: AutoSaveIntervalMs) => void;
   storageSpaces: StorageSpace[];
   activeStorageSpaceId: number | null;
   activeStorageSpace: StorageSpace | null;
@@ -147,6 +187,12 @@ export function GenSettingsProvider({ children }: { children: ReactNode }) {
   const [applyReplaceOnExportState, setApplyReplaceOnExportState] = useState<boolean>(
     readInitialApplyReplaceOnExport
   );
+  const [autoSaveEnabledState, setAutoSaveEnabledState] = useState<boolean>(
+    readInitialAutoSaveEnabled
+  );
+  const [autoSaveIntervalMsState, setAutoSaveIntervalMsState] = useState<AutoSaveIntervalMs>(
+    readInitialAutoSaveInterval
+  );
   const [storageSpaces, setStorageSpaces] = useState<StorageSpace[]>([]);
   const [activeStorageSpaceId, setActiveStorageSpaceId] = useState<number | null>(null);
   const [exportFormatRules, setExportFormatRules] = useState<ClipboardExportFormatRule[]>(DEFAULT_EXPORT_FORMAT_RULES);
@@ -158,12 +204,14 @@ export function GenSettingsProvider({ children }: { children: ReactNode }) {
     setLoading(true);
     try {
       await initDb();
-      const [spaces, chipSetting, toolbarSetting, tableCellSetting, replaceSetting, activeSetting, dbRules] = await Promise.all([
+      const [spaces, chipSetting, toolbarSetting, tableCellSetting, replaceSetting, autoSaveSetting, autoSaveIntervalSetting, activeSetting, dbRules] = await Promise.all([
         listStorageSpaces(),
         getAppSetting('chip_mode'),
         getAppSetting('show_format_toolbar'),
         getAppSetting('copy_as_table_cell'),
         getAppSetting('apply_replace_on_export'),
+        getAppSetting('auto_save_enabled'),
+        getAppSetting('auto_save_interval_ms'),
         getAppSetting('active_storage_space_id'),
         listExportFormatRules(),
       ]);
@@ -180,16 +228,25 @@ export function GenSettingsProvider({ children }: { children: ReactNode }) {
       const nextToolbar = parseBool(toolbarSetting, localToolbar);
       const nextTableCell = parseBool(tableCellSetting, localTableCell);
       const nextApplyReplace = parseBool(replaceSetting, localApplyReplace);
+      const nextAutoSave = parseBool(autoSaveSetting, readInitialAutoSaveEnabled());
+      const nextAutoSaveInterval = parseAutoSaveInterval(
+        autoSaveIntervalSetting,
+        readInitialAutoSaveInterval()
+      );
       if (chipSetting == null) await setAppSetting('chip_mode', nextChip);
       if (toolbarSetting == null) await setAppSetting('show_format_toolbar', String(nextToolbar));
       if (tableCellSetting == null) await setAppSetting('copy_as_table_cell', String(nextTableCell));
       if (replaceSetting == null) await setAppSetting('apply_replace_on_export', String(nextApplyReplace));
+      if (autoSaveSetting == null) await setAppSetting('auto_save_enabled', String(nextAutoSave));
+      if (autoSaveIntervalSetting == null) await setAppSetting('auto_save_interval_ms', String(nextAutoSaveInterval));
       setStorageSpaces(spaces);
       setActiveStorageSpaceId(Number.isFinite(nextActiveId) ? nextActiveId : null);
       setChipModeState(nextChip);
       setShowFormatToolbarState(nextToolbar);
       setCopyAsTableCellState(nextTableCell);
       setApplyReplaceOnExportState(nextApplyReplace);
+      setAutoSaveEnabledState(nextAutoSave);
+      setAutoSaveIntervalMsState(nextAutoSaveInterval);
       setExportFormatRules(dbRulesToClipboardRules(dbRules));
     } catch (err) {
       console.error('Failed to load gen settings', err);
@@ -222,7 +279,15 @@ export function GenSettingsProvider({ children }: { children: ReactNode }) {
     void setAppSetting('apply_replace_on_export', String(value)).catch((err) => console.error('Persist apply-replace-on-export failed', err));
   }, []);
 
+  const setAutoSaveEnabled = useCallback((value: boolean) => {
+    setAutoSaveEnabledState(value);
+    void setAppSetting('auto_save_enabled', String(value)).catch((err) => console.error('Persist auto-save-enabled failed', err));
+  }, []);
 
+  const setAutoSaveIntervalMs = useCallback((value: AutoSaveIntervalMs) => {
+    setAutoSaveIntervalMsState(value);
+    void setAppSetting('auto_save_interval_ms', String(value)).catch((err) => console.error('Persist auto-save-interval failed', err));
+  }, []);
 
   const toggleChipMode = useCallback(
     () => setChipMode(chipModeState === 'code' ? 'name' : 'code'),
@@ -261,6 +326,10 @@ export function GenSettingsProvider({ children }: { children: ReactNode }) {
         setCopyAsTableCell,
         applyReplaceOnExport: applyReplaceOnExportState,
         setApplyReplaceOnExport,
+        autoSaveEnabled: autoSaveEnabledState,
+        setAutoSaveEnabled,
+        autoSaveIntervalMs: autoSaveIntervalMsState,
+        setAutoSaveIntervalMs,
         storageSpaces,
         activeStorageSpaceId,
         activeStorageSpace,

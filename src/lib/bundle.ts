@@ -10,6 +10,7 @@ import {
   createFolder,
   getStorageSpace,
   getAppSetting,
+  setProjectPanelLayout,
   saveGenCells,
   saveTemplates,
   saveBlocks,
@@ -18,7 +19,6 @@ import {
   type GenCellWithSlots,
   type GenTemplateData,
   type BlockData,
-  setProjectPanelLayout,
 } from './db';
 
 // ============================================================================
@@ -579,6 +579,7 @@ export async function importBundle(
     await saveGenCells(targetId, genCells, { forceFull: true });
     await saveTemplates(targetId, templates, { forceFull: true });
     await saveBlocks(targetId, blocks, { forceFull: true });
+
     // 2e. 项目级面板布局：只在 bundle 里带了这份数据时写入（老 zip 没有该字段 →
     // 当作 NULL，目标项目保留原有 / 默认布局）。布局是脏数据也无所谓，
     // PanelLayoutContext 读取时会逐字段校验并安全回退。

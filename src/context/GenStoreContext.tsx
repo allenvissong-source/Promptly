@@ -25,7 +25,15 @@ interface GenStoreValue {
   cells: GenCellData[];
   // Manual save: true when there are unsaved changes since the last save/load.
   dirty: boolean;
-  save: () => Promise<void>;
+  // 内存里这份 cells 是从哪个项目 hydrate 出来的。null = 还没 hydrate 完成
+  // （或正在切项目），此刻 cells 是「空的初始态」，任何写库都会清空用户项目。
+  // 自动保存调度器用它当 ready 门闸，save() 自己也再校验一次。
+  hydratedProjectId: number | null;
+  // expectProjectId：调用方以为自己在存哪个项目。传了就必须与实际 hydrate 的项目
+  // 一致，否则拒绝写 —— 杜绝「把 A 项目内容写进 B 项目」。
+  save: (expectProjectId?: number) => Promise<void>;
+  // 保存成功后由编排层调用（自动保存写完 / 快照还原后）。
+  markSaved: () => void;
   addImageToCell: (cellId: string, item: GenImageItem) => void;
   // Create a new cell seeded with one image (drag onto blank area). Returns the
   // new cell id so a multi-image drop can append the rest into the same cell.
@@ -61,12 +69,17 @@ export function GenStoreProvider({ children }: { children: ReactNode }) {
   const [cells, setCells] = useState<GenCellData[]>([]);
   const [dirty, setDirty] = useState(false);
 
-  // Manual save only. Auto-save was dropped because the debounced async writes
-  // raced each other (full DELETE-then-reinsert) and the last change before an
-  // app close was lost. Now the board only hits the DB when the user presses
-  // Ctrl+S. `readyRef` gates out marking dirty during hydration; `cellsRef`
-  // keeps the latest board for the keyboard handler without stale closures.
-  const readyRef = useRef(false);
+  // 自动保存（v7）：调度逻辑集中在 AutoSaveContext + lib/autoSave.ts 的纯状态机，
+  // 这里只负责「内存 -> 库」的那一步，以及暴露 hydrate 完成信号。
+  // hydratedForRef 取代了原来的布尔 readyRef：不仅表示「hydrate 完成了」，还记住
+  // 「完成的是哪个项目」，save() 一律写这个 id，绝不用 activeProjectId（切项目瞬间
+  // activeProjectId 可能已经指向新项目，而内存里还是旧项目的内容）。
+  const hydratedForRef = useRef<number | null>(null);
+  const [hydratedProjectId, setHydratedProjectId] = useState<number | null>(null);
+  // hydrate 自己 setCells 的那个数组。React 会把「setCells + 开门闸」批成同一次
+  // 渲染，所以下面的 dirty 效果在 hydrate 结束后一定会跑一次；用身份比较把它认出来，
+  // 否则每次打开项目都会立刻变脏，自动保存又会把刚读出来的东西原样写回去。
+  const hydratedCellsRef = useRef<GenCellData[] | null>(null);
   const cellsRef = useRef(cells);
   cellsRef.current = cells;
 
@@ -80,13 +93,16 @@ export function GenStoreProvider({ children }: { children: ReactNode }) {
     });
   }, [register]);
 
-  // Hydrate on project switch. Unsaved changes in the outgoing project are
-  // discarded — that is the trade-off of manual save.
+  // Hydrate on project switch. 未保存内容不再静默丢弃：切项目前由 AutoSaveContext
+  // 先 flush 一次（用旧 projectId），这里只负责加载新项目。
   useEffect(() => {
-    readyRef.current = false;
+    hydratedForRef.current = null;
+    setHydratedProjectId(null);
     setDirty(false);
     if (activeProjectId == null) {
-      setCells([]);
+      const empty: GenCellData[] = [];
+      hydratedCellsRef.current = empty;
+      setCells(empty);
       return;
     }
     const pid = activeProjectId;
@@ -95,26 +111,35 @@ export function GenStoreProvider({ children }: { children: ReactNode }) {
       try {
         const loaded = await loadGenCells(pid);
         if (cancelled) return;
-        setCells(
-          loaded.map((c) => ({
-            id: c.id,
-            note: c.note ? (JSON.parse(c.note) as JSONContent) : null,
-            images: c.slots.map((s) => ({
-              id: s.id,
-              mediaId: s.media_id,
-              name: s.name,
-              thumb: s.thumb ?? '',
-              path: s.path ?? '',
-              meta: s.meta ?? '',
-              type: s.type,
-            })),
-          }))
-        );
+        const hydrated: GenCellData[] = loaded.map((c) => ({
+          id: c.id,
+          note: c.note ? (JSON.parse(c.note) as JSONContent) : null,
+          images: c.slots.map((s) => ({
+            id: s.id,
+            mediaId: s.media_id,
+            name: s.name,
+            thumb: s.thumb ?? '',
+            path: s.path ?? '',
+            meta: s.meta ?? '',
+            type: s.type,
+          })),
+        }));
+        hydratedCellsRef.current = hydrated;
+        setCells(hydrated);
       } catch (err) {
         console.error('Failed to load gen cells', err);
-        if (!cancelled) setCells([]);
+        if (!cancelled) {
+          const empty: GenCellData[] = [];
+          hydratedCellsRef.current = empty;
+          setCells(empty);
+        }
       } finally {
-        if (!cancelled) readyRef.current = true;
+        // 只有 hydrate 真正跑完（含失败兜底成空列表）才开门闸。cancelled 的那次
+        // 说明项目又切走了，绝不能开门 —— 否则会把上一个项目的内存写进新项目。
+        if (!cancelled) {
+          hydratedForRef.current = pid;
+          setHydratedProjectId(pid);
+        }
       }
     })();
     return () => {
@@ -124,13 +149,21 @@ export function GenStoreProvider({ children }: { children: ReactNode }) {
 
   // Any post-hydration change marks the board dirty (unsaved).
   useEffect(() => {
-    if (!readyRef.current) return;
+    if (hydratedForRef.current == null) return;
+    // hydrate 刚写进来的那份数据不算用户改动（无脏不写）。
+    if (hydratedCellsRef.current === cells) return;
     setDirty(true);
   }, [cells]);
 
-  const save = useCallback(async () => {
-    if (activeProjectId == null) return;
-    const pid = activeProjectId;
+  const markSaved = useCallback(() => setDirty(false), []);
+
+  const save = useCallback(async (expectProjectId?: number) => {
+    // 写库一律用 hydrate 出来的那个项目 id，不用 activeProjectId。
+    const pid = hydratedForRef.current;
+    // ⚠️ hydrate 未完成一律拒绝写：此刻 cells 是空的初始态。
+    if (pid == null) return;
+    // ⚠️ 串项目守卫：调用方期望的项目与内存实际归属不一致时拒绝写。
+    if (expectProjectId != null && expectProjectId !== pid) return;
     try {
       await saveGenCells(
         pid,
@@ -150,9 +183,12 @@ export function GenStoreProvider({ children }: { children: ReactNode }) {
       );
       setDirty(false);
     } catch (err) {
+      // 失败不再被吞掉：保留原有日志，同时向上抛，让编排层显示「保存失败」并保持
+      // dirty=true 等下一轮重试。
       console.error('Failed to save gen cells', err);
+      throw err;
     }
-  }, [activeProjectId]);
+  }, []);
 
   // B7: the Ctrl+S / Cmd+S shortcut is now handled by a SINGLE global handler
   // in App's top bar, which fans out to every store's save via the combined
@@ -258,7 +294,9 @@ export function GenStoreProvider({ children }: { children: ReactNode }) {
       value={{
         cells,
         dirty,
+        hydratedProjectId,
         save,
+        markSaved,
         addImageToCell,
         newCellWithImage,
         newEmptyCell,

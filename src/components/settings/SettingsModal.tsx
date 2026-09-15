@@ -24,7 +24,7 @@ import {
   type ExportFormatRule,
   type StorageSpace,
 } from '../../lib/db';
-import { useGenSettings, type ChipMode } from '../../context/GenSettingsContext';
+import { useGenSettings, AUTO_SAVE_INTERVAL_OPTIONS, type AutoSaveIntervalMs, type ChipMode } from '../../context/GenSettingsContext';
 
 interface SettingsModalProps {
   open: boolean;
@@ -136,6 +136,10 @@ export default function SettingsModal({ open: isOpen, onClose }: SettingsModalPr
     setCopyAsTableCell,
     applyReplaceOnExport,
     setApplyReplaceOnExport,
+    autoSaveEnabled,
+    setAutoSaveEnabled,
+    autoSaveIntervalMs,
+    setAutoSaveIntervalMs,
     storageSpaces,
     activeStorageSpaceId,
     activeStorageSpace,
@@ -419,6 +423,49 @@ export default function SettingsModal({ open: isOpen, onClose }: SettingsModalPr
           <div className="min-h-0 flex-1 overflow-y-auto p-5 scrollbar-dark">
             {section === 'general' && (
               <section className="space-y-5">
+                <div className="rounded-xl border border-[#3D3D3D] bg-[#2A2A2A] p-4">
+                  <label className="flex items-start justify-between gap-4">
+                    <div>
+                      <div className="text-[14px] font-medium text-[#E5E5E5]">自动保存</div>
+                      <div className="mt-1 text-[12px] text-[#8A8A8A]">
+                        停止输入后自动写入数据库；卡片增删、拖拽结束、切换项目前、窗口失焦与关闭窗口时会立即保存。关闭后需手动
+                        Ctrl/Cmd+S 保存。
+                      </div>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={autoSaveEnabled}
+                      onChange={(event) => setAutoSaveEnabled(event.target.checked)}
+                      className="mt-1 h-4 w-4 shrink-0 accent-[#2EC4B6]"
+                    />
+                  </label>
+                  <div className={`mt-3 ${autoSaveEnabled ? '' : 'pointer-events-none opacity-40'}`}>
+                    <div className="mb-2 text-[12px] text-[#BDBDBD]">空闲后多久保存</div>
+                    <div className="grid grid-cols-2 gap-3">
+                      {AUTO_SAVE_INTERVAL_OPTIONS.map((value) => (
+                        <button
+                          key={value}
+                          onClick={() => setAutoSaveIntervalMs(value as AutoSaveIntervalMs)}
+                          className={`rounded-lg border p-3 text-left transition-colors ${
+                            autoSaveIntervalMs === value
+                              ? 'border-[#2EC4B6] bg-[#2EC4B6]/10 text-[#E5E5E5]'
+                              : 'border-[#3D3D3D] bg-[#252525] text-[#BDBDBD] hover:bg-[#303030]'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between text-[13px] font-medium">
+                            {value === 1500 ? '1.5 秒' : '5 秒'}
+                            {autoSaveIntervalMs === value && <Check size={14} className="text-[#2EC4B6]" />}
+                          </div>
+                          <div className="mt-1 text-[12px] text-[#8A8A8A]">
+                            {value === 1500 ? '更及时，推荐' : '更省写入，适合长文连续输入'}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                    <div className="mt-2 text-[11px] text-[#8A8A8A]">连续编辑最多 30 秒也会强制保存一次。</div>
+                  </div>
+                </div>
+
                 <div className="rounded-xl border border-[#3D3D3D] bg-[#2A2A2A] p-4">
                   <div className="mb-3 text-[14px] font-medium text-[#E5E5E5]">引用显示</div>
                   <div className="grid grid-cols-2 gap-3">

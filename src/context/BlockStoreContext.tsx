@@ -27,7 +27,10 @@ export interface BlockData {
 interface BlockStoreValue {
   blocks: BlockData[];
   dirty: boolean;
-  save: () => Promise<void>;
+  // 见 GenStoreContext：内存里这份 blocks 是从哪个项目 hydrate 出来的。
+  hydratedProjectId: number | null;
+  save: (expectProjectId?: number) => Promise<void>;
+  markSaved: () => void;
   addBlock: () => void;
   deleteBlock: (id: string) => void;
   // Duplicate a block (copied content/combine flag/images with fresh slot ids)
@@ -70,7 +73,12 @@ export function BlockStoreProvider({ children }: { children: ReactNode }) {
   const [blocks, setBlocks] = useState<BlockData[]>([]);
   const [dirty, setDirty] = useState(false);
 
-  const readyRef = useRef(false);
+  // 与 GenStore 同构：hydratedForRef 既当 dirty 门闸，也当 save() 的写入目标。
+  const hydratedForRef = useRef<number | null>(null);
+  const [hydratedProjectId, setHydratedProjectId] = useState<number | null>(null);
+  // 见 GenStoreContext：hydrate 自己写进来的那份数组，用来把「hydrate 结束后必然
+  // 跑一次的 dirty 效果」认出来，避免每次打开项目都被当成用户改动。
+  const hydratedBlocksRef = useRef<BlockData[] | null>(null);
   const blocksRef = useRef(blocks);
   blocksRef.current = blocks;
 
@@ -83,10 +91,13 @@ export function BlockStoreProvider({ children }: { children: ReactNode }) {
   }, [register]);
 
   useEffect(() => {
-    readyRef.current = false;
+    hydratedForRef.current = null;
+    setHydratedProjectId(null);
     setDirty(false);
     if (activeProjectId == null) {
-      setBlocks([]);
+      const empty: BlockData[] = [];
+      hydratedBlocksRef.current = empty;
+      setBlocks(empty);
       return;
     }
     const pid = activeProjectId;
@@ -95,27 +106,35 @@ export function BlockStoreProvider({ children }: { children: ReactNode }) {
       try {
         const loaded = await loadBlocks(pid);
         if (cancelled) return;
-        setBlocks(
-          loaded.map((b) => ({
-            id: b.id,
-            content: b.content ? (JSON.parse(b.content) as JSONContent) : null,
-            combineEnabled: b.combineEnabled,
-            images: b.slots.map((s) => ({
-              id: s.id,
-              mediaId: s.media_id,
-              name: s.name,
-              thumb: s.thumb ?? '',
-              path: s.path ?? '',
-              meta: s.meta ?? '',
-              type: s.type,
-            })),
-          }))
-        );
+        const hydrated: BlockData[] = loaded.map((b) => ({
+          id: b.id,
+          content: b.content ? (JSON.parse(b.content) as JSONContent) : null,
+          combineEnabled: b.combineEnabled,
+          images: b.slots.map((s) => ({
+            id: s.id,
+            mediaId: s.media_id,
+            name: s.name,
+            thumb: s.thumb ?? '',
+            path: s.path ?? '',
+            meta: s.meta ?? '',
+            type: s.type,
+          })),
+        }));
+        hydratedBlocksRef.current = hydrated;
+        setBlocks(hydrated);
       } catch (err) {
         console.error('Failed to load blocks', err);
-        if (!cancelled) setBlocks([]);
+        if (!cancelled) {
+          const empty: BlockData[] = [];
+          hydratedBlocksRef.current = empty;
+          setBlocks(empty);
+        }
       } finally {
-        if (!cancelled) readyRef.current = true;
+        // cancelled 说明项目又切走了：不开门闸。
+        if (!cancelled) {
+          hydratedForRef.current = pid;
+          setHydratedProjectId(pid);
+        }
       }
     })();
     return () => {
@@ -124,13 +143,19 @@ export function BlockStoreProvider({ children }: { children: ReactNode }) {
   }, [activeProjectId, reloadToken]);
 
   useEffect(() => {
-    if (!readyRef.current) return;
+    if (hydratedForRef.current == null) return;
+    // hydrate 刚写进来的那份数据不算用户改动（无脏不写）。
+    if (hydratedBlocksRef.current === blocks) return;
     setDirty(true);
   }, [blocks]);
 
-  const save = useCallback(async () => {
-    if (activeProjectId == null) return;
-    const pid = activeProjectId;
+  const markSaved = useCallback(() => setDirty(false), []);
+
+  const save = useCallback(async (expectProjectId?: number) => {
+    const pid = hydratedForRef.current;
+    // ⚠️ hydrate 未完成 / 串项目：拒绝写。
+    if (pid == null) return;
+    if (expectProjectId != null && expectProjectId !== pid) return;
     try {
       await saveBlocks(
         pid,
@@ -151,9 +176,11 @@ export function BlockStoreProvider({ children }: { children: ReactNode }) {
       );
       setDirty(false);
     } catch (err) {
+      // 失败向上抛（保留日志），由编排层显示「保存失败」并保持 dirty=true。
       console.error('Failed to save blocks', err);
+      throw err;
     }
-  }, [activeProjectId]);
+  }, []);
 
   // B7: Ctrl+S is handled by ONE global handler in App's top bar (combined save
   // across all stores); the per-store handler was removed so the shortcut fires
@@ -299,7 +326,9 @@ export function BlockStoreProvider({ children }: { children: ReactNode }) {
       value={{
         blocks,
         dirty,
+        hydratedProjectId,
         save,
+        markSaved,
         addBlock,
         deleteBlock,
         duplicateBlock,

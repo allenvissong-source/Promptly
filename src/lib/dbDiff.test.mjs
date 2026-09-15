@@ -9,6 +9,8 @@ import {
   fieldsFingerprint,
   normalizeSqlValue,
   pickFields,
+  encodeSnapshotPayload,
+  decodeSnapshotPayload,
 } from './dbDiff.ts';
 
 // ---- 构造期望态（内存里的卡片） --------------------------------------------
@@ -273,4 +275,20 @@ test('缺列的一行被判定为有变化（宁可多写一次，绝不漏写�
 // 快照 payload 编解码
 // ============================================================================
 
+test('快照 payload 编解码往返，且两次编码同一内容结果一致', () => {
+  const project = { name: 'p', panelLayout: null, genCells: [], templates: [], blocks: [], media: [], folders: [] };
+  const text = encodeSnapshotPayload({ schemaVersion: 7, project, capturedAt: 123 });
+  assert.equal(text, encodeSnapshotPayload({ schemaVersion: 7, project, capturedAt: 123 }));
+  const decoded = decodeSnapshotPayload(text);
+  assert.equal(decoded.snapshotVersion, 1);
+  assert.equal(decoded.schemaVersion, 7);
+  assert.equal(decoded.capturedAt, 123);
+  assert.deepEqual(decoded.project, project);
+});
 
+test('坏 JSON / 版本不认识 / 缺 project → decode 返回 null（当快照不可用）', () => {
+  assert.equal(decodeSnapshotPayload('{not json'), null);
+  assert.equal(decodeSnapshotPayload('null'), null);
+  assert.equal(decodeSnapshotPayload(JSON.stringify({ snapshotVersion: 99, project: {} })), null);
+  assert.equal(decodeSnapshotPayload(JSON.stringify({ snapshotVersion: 1 })), null);
+});
