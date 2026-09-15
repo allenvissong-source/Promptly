@@ -1,0 +1,45 @@
+// stdio 模式的客户端配置模板。
+//
+// 用法：把对应片段拷进你客户端的 MCP 配置文件。stdio 需要客户端能把 server 作为
+// 子进程拉起 —— Claude Code、Codex、Cursor 都支持。豆包的「自定义连接器」只接受
+// HTTP URL，用不了 stdio，那边请改用 `npm run start:http`。
+//
+// 路径已按本机实际位置填好，换机器要改 args 里的绝对路径。
+{
+  "//": "── Claude Code ─ 写入 ~/.claude.json 的 mcpServers 字段 ──",
+  "claudeCode": {
+    "mcpServers": {
+      "promptly": {
+        "command": "npx",
+        "args": ["tsx", "/Users/bytedance/Promptly/mcp-server/src/index.ts"],
+        "cwd": "/Users/bytedance/Promptly/mcp-server"
+      }
+    }
+  },
+
+  "//claudeDesktop": "── Claude Desktop ─ 写入 ~/Library/Application Support/Claude/claude_desktop_config.json ──",
+  "claudeDesktop": {
+    "mcpServers": {
+      "promptly": {
+        "command": "npx",
+        "args": ["tsx", "/Users/bytedance/Promptly/mcp-server/src/index.ts"],
+        "cwd": "/Users/bytedance/Promptly/mcp-server"
+      }
+    }
+  },
+
+  "//cursor": "── Cursor ─ 写入项目内 .cursor/mcp.json 或全局 ~/.cursor/mcp.json ──",
+  "cursor": {
+    "mcpServers": {
+      "promptly": {
+        "command": "npx",
+        "args": ["tsx", "/Users/bytedance/Promptly/mcp-server/src/index.ts"],
+        "cwd": "/Users/bytedance/Promptly/mcp-server"
+      }
+    }
+  },
+
+  "//codex": "── Codex ─ ~/.codex/config.toml 用的是 TOML，对应写法见 README ──",
+
+  "//note": "cwd 不是必需的（实测从任意目录都能解析到本地依赖），但显式指定更稳妥，也便于日后排查。"
+}

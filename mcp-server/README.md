@@ -14,13 +14,13 @@ npm run smoke     # 验证能读到数据、序列化正确
 
 ### stdio（默认，推荐）
 
-给 Claude Code / Codex 这类能拉起子进程的客户端。没有监听端口，无网络攻击面。
+给 Claude Code / Codex / Cursor 这类能把 server 作为子进程拉起的客户端。没有监听端口，无网络攻击面。
 
 ```bash
 npm start
 ```
 
-客户端配置示例：
+客户端配置见 `client-config.example.json`。Claude Code / Claude Desktop / Cursor 都是 JSON：
 
 ```json
 {
@@ -33,16 +33,26 @@ npm start
 }
 ```
 
+Codex 用 TOML（`~/.codex/config.toml`）：
+
+```toml
+[mcp_servers.promptly]
+command = "npx"
+args = ["tsx", "/Users/<你>/Promptly/mcp-server/src/index.ts"]
+```
+
+配置文件位置：Claude Code `~/.claude.json`、Claude Desktop `~/Library/Application Support/Claude/claude_desktop_config.json`、Cursor `~/.cursor/mcp.json` 或项目内 `.cursor/mcp.json`。
+
 ### Streamable HTTP
 
-给只能填 URL 的客户端（如豆包的自定义连接器）。
+给只能填 URL 的客户端。**豆包的自定义连接器只支持 HTTP，用不了 stdio，走这条。**
 
 ```bash
 npm run start:http              # 127.0.0.1:3721/mcp
 npm run start:http -- --port N  # 换端口
 ```
 
-启动后把打印出来的 `http://127.0.0.1:3721/mcp` 填进客户端即可。
+启动后把打印出来的 `http://127.0.0.1:3721/mcp` 填进客户端的「服务器 URL」，传输类型选 HTTP，不需要额外 Headers。
 
 ## 工具
 
