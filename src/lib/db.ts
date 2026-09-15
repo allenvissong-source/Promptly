@@ -1,5 +1,18 @@
 import Database from '@tauri-apps/plugin-sql';
 import { invoke } from '@tauri-apps/api/core';
+import {
+  GEN_AREA_SPEC,
+  TEMPLATE_AREA_SPEC,
+  BLOCK_AREA_SPEC,
+  buildFullWritePlan,
+  buildIncrementalWritePlan,
+  pickFields,
+  type AreaTableSpec,
+  type AreaFingerprint,
+  type DesiredContainer,
+  type SqlValue,
+  type WritePlanStats,
+} from './dbDiff';
 
 let db: Database | null = null;
 
@@ -64,6 +77,9 @@ export type AppSettingKey =
   | 'chip_mode'
   | 'show_format_toolbar'
   | 'copy_as_table_cell'
+  | 'apply_replace_on_export'
+  | 'auto_save_enabled'
+  | 'auto_save_interval_ms'
   | (string & {});
 
 export interface AppSetting {
@@ -268,6 +284,7 @@ async function migrateSchema(database: Database): Promise<void> {
     await executeBatch(statements);
     version = 6;
   }
+
 }
 
 export async function initDb(): Promise<void> {
@@ -439,6 +456,7 @@ export async function deleteProject(id: number): Promise<void> {
   const database = await getDb();
   await database.execute('DELETE FROM media WHERE project_id = ?', [id]);
   await database.execute('DELETE FROM media_folders WHERE project_id = ?', [id]);
+  // v7: 项目没了，它的历史快照也没有意义，顺手清掉避免库里留孤儿行。
   await database.execute('DELETE FROM projects WHERE id = ?', [id]);
   // Remove the project's upload directory on the filesystem.
   try {
@@ -910,6 +928,109 @@ export async function copyMedia(
 }
 
 // ============================================
+// 区域写入（生图 / 模板 / 分镜共用的增量写入通道）
+// ============================================
+
+// 一个槽位在写库时需要的字段（三个区域的槽位表结构完全一致）。GenSlotRecord /
+// TemplateSlotRecord / BlockSlotRecord 都结构兼容它。
+interface AreaSlotInput {
+  id: string;
+  media_id: number;
+  name: string;
+  thumb: string | null;
+  path: string | null;
+  meta: string | null;
+  type: 'video' | 'image' | 'audio';
+}
+
+export interface SaveAreaOptions {
+  // 强制全量覆盖（DELETE 全部 + 重新 INSERT）。首次保存、schema 变更后、或任何
+  // 怀疑 diff 不可信的场合的兜底入口；不传时默认走增量。
+  forceFull?: boolean;
+}
+
+// 保存结果：调用方可以忽略（改造前返回 void），自动保存编排会用它判断这次到底
+// 写了什么。
+export interface SaveAreaResult extends WritePlanStats {
+  // true = 这次退化成了全量覆盖。
+  full: boolean;
+  // 本次事务里的语句总数。
+  statements: number;
+}
+
+function slotToDesired(slot: AreaSlotInput) {
+  return {
+    id: slot.id,
+    fields: {
+      media_id: slot.media_id,
+      name: slot.name,
+      thumb: slot.thumb,
+      path: slot.path,
+      meta: slot.meta,
+      type: slot.type,
+    } as Record<string, SqlValue>,
+  };
+}
+
+// 读该项目在某个区域里的现状指纹（id + position + 业务列）。任何一行形状不对就
+// 抛错，调用方据此退化成全量覆盖 —— 宁可多写，不能漏写。
+async function readAreaFingerprint(spec: AreaTableSpec, projectId: number): Promise<AreaFingerprint> {
+  const database = await getDb();
+  const containerRows = await database.select<Record<string, unknown>[]>(
+    `SELECT id, position, ${spec.containerColumns.join(', ')} FROM ${spec.containerTable} WHERE project_id = ?`,
+    [projectId]
+  );
+  const slotRows = await database.select<Record<string, unknown>[]>(
+    `SELECT s.id AS id, s.${spec.parentColumn} AS parent_id, s.position AS position, ${spec.slotColumns.map((c) => `s.${c}`).join(', ')}
+     FROM ${spec.slotTable} s
+     JOIN ${spec.containerTable} c ON c.id = s.${spec.parentColumn}
+     WHERE c.project_id = ?`,
+    [projectId]
+  );
+  return {
+    containers: containerRows.map((row) => {
+      if (typeof row.id !== 'string' || !Number.isFinite(Number(row.position))) {
+        throw new Error(`Unexpected ${spec.containerTable} row shape`);
+      }
+      return { id: row.id, position: Number(row.position), fields: pickFields(spec.containerColumns, row) };
+    }),
+    slots: slotRows.map((row) => {
+      if (typeof row.id !== 'string' || typeof row.parent_id !== 'string' || !Number.isFinite(Number(row.position))) {
+        throw new Error(`Unexpected ${spec.slotTable} row shape`);
+      }
+      return {
+        id: row.id,
+        parentId: row.parent_id,
+        position: Number(row.position),
+        fields: pickFields(spec.slotColumns, row),
+      };
+    }),
+  };
+}
+
+// 把一个区域的内存态写库。默认先读指纹算 diff，只写「新增 / 更新 / 删除」三组；
+// 指纹读失败、期望态里有重复 id、或增量语句数不比全量少时，自动退化成全量覆盖。
+// 无论走哪条路，最终都是 ONE executeBatch = 一个 SQLite 事务，要么全成要么全不成。
+async function writeArea(
+  spec: AreaTableSpec,
+  projectId: number,
+  containers: DesiredContainer[],
+  opts?: SaveAreaOptions
+): Promise<SaveAreaResult> {
+  let plan = buildFullWritePlan(spec, projectId, containers, 'forced');
+  if (!opts?.forceFull) {
+    try {
+      plan = buildIncrementalWritePlan(spec, projectId, containers, await readAreaFingerprint(spec, projectId));
+    } catch (err) {
+      // 读不到可信指纹就退回全量：数据完整性优先于语句数。
+      console.warn(`Incremental diff for ${spec.containerTable} failed; falling back to a full rewrite`, err);
+    }
+  }
+  await executeBatch(plan.statements);
+  return { ...plan.stats, full: plan.full, statements: plan.statements.length };
+}
+
+// ============================================
 // Gen area (生图区)
 // ============================================
 export interface GenSlotRecord {
@@ -960,41 +1081,31 @@ export async function loadGenCells(projectId: number): Promise<GenCellWithSlots[
   }));
 }
 
-// Full rewrite of a project's gen area, applied atomically. All statements
-// (DELETE-all + re-INSERT) run inside ONE SQLite transaction via executeBatch,
-// so a mid-save failure rolls the whole thing back instead of leaving the
-// project half-written. The batch runs on a single pooled connection (Rust
-// side), so it does not hit the connection-pool wedge that a JS-side manual
-// BEGIN/COMMIT (split across execute() calls) would.
+// 一个项目的生图区写库。改造前是「DELETE 全部 + 全部重新 INSERT」；现在默认先
+// 和库里的现状做 diff，只写真正变化的卡片 / 槽位（forceFull 走老的全量路径）。
+// 两条路径都只发一次 executeBatch，也就是同一个 SQLite 事务：中途失败整体回滚，
+// 绝不会留下半写状态。批量跑在 Rust 侧的单条池化连接上，所以不会踩 JS 侧手写
+// BEGIN/COMMIT（跨多次 execute()）会造成的连接池死锁。
 export async function saveGenCells(
   projectId: number,
   cells: {
     id: string;
     note: string | null;
     slots: Omit<GenSlotRecord, 'cell_id' | 'position'>[];
-  }[]
-): Promise<void> {
-  const batch: BatchStatement[] = [];
-  batch.push([
-    'DELETE FROM gen_slots WHERE cell_id IN (SELECT id FROM gen_cells WHERE project_id = ?)',
-    [projectId],
-  ]);
-  batch.push(['DELETE FROM gen_cells WHERE project_id = ?', [projectId]]);
-  for (let ci = 0; ci < cells.length; ci++) {
-    const cell = cells[ci];
-    batch.push([
-      'INSERT INTO gen_cells (id, project_id, position, note) VALUES (?, ?, ?, ?)',
-      [cell.id, projectId, ci, cell.note],
-    ]);
-    for (let si = 0; si < cell.slots.length; si++) {
-      const s = cell.slots[si];
-      batch.push([
-        'INSERT INTO gen_slots (id, cell_id, media_id, name, thumb, path, meta, type, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [s.id, cell.id, s.media_id, s.name, s.thumb, s.path, s.meta, s.type, si],
-      ]);
-    }
-  }
-  await executeBatch(batch);
+  }[],
+  opts?: SaveAreaOptions
+): Promise<SaveAreaResult> {
+  return writeArea(GEN_AREA_SPEC, projectId, genCellsToDesired(cells), opts);
+}
+
+function genCellsToDesired(
+  cells: { id: string; note: string | null; slots: AreaSlotInput[] }[]
+): DesiredContainer[] {
+  return cells.map((cell) => ({
+    id: cell.id,
+    fields: { note: cell.note },
+    slots: cell.slots.map(slotToDesired),
+  }));
 }
 
 // ============================================
@@ -1059,8 +1170,8 @@ export async function loadTemplates(projectId: number): Promise<GenTemplateData[
   }));
 }
 
-// Full rewrite of a project's templates and their slots, applied atomically in
-// one transaction via executeBatch (same rationale as saveGenCells).
+// 模板区写库。默认增量，forceFull 退回全量覆盖；同样是单个 executeBatch 事务
+// （与 saveGenCells 同一套通道）。
 export async function saveTemplates(
   projectId: number,
   templates: {
@@ -1070,29 +1181,32 @@ export async function saveTemplates(
     referenceable: boolean;
     includeTitle: boolean;
     slots: Omit<TemplateSlotRecord, 'template_id' | 'position'>[];
+  }[],
+  opts?: SaveAreaOptions
+): Promise<SaveAreaResult> {
+  return writeArea(TEMPLATE_AREA_SPEC, projectId, templatesToDesired(templates), opts);
+}
+
+function templatesToDesired(
+  templates: {
+    id: string;
+    name: string;
+    content: string | null;
+    referenceable: boolean;
+    includeTitle: boolean;
+    slots: AreaSlotInput[];
   }[]
-): Promise<void> {
-  const batch: BatchStatement[] = [];
-  batch.push([
-    'DELETE FROM template_slots WHERE template_id IN (SELECT id FROM gen_templates WHERE project_id = ?)',
-    [projectId],
-  ]);
-  batch.push(['DELETE FROM gen_templates WHERE project_id = ?', [projectId]]);
-  for (let i = 0; i < templates.length; i++) {
-    const t = templates[i];
-    batch.push([
-      'INSERT INTO gen_templates (id, project_id, position, name, content, referenceable, include_title) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [t.id, projectId, i, t.name, t.content, t.referenceable ? 1 : 0, t.includeTitle ? 1 : 0],
-    ]);
-    for (let si = 0; si < t.slots.length; si++) {
-      const s = t.slots[si];
-      batch.push([
-        'INSERT INTO template_slots (id, template_id, media_id, name, thumb, path, meta, type, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [s.id, t.id, s.media_id, s.name, s.thumb, s.path, s.meta, s.type, si],
-      ]);
-    }
-  }
-  await executeBatch(batch);
+): DesiredContainer[] {
+  return templates.map((template) => ({
+    id: template.id,
+    fields: {
+      name: template.name,
+      content: template.content,
+      referenceable: template.referenceable ? 1 : 0,
+      include_title: template.includeTitle ? 1 : 0,
+    },
+    slots: template.slots.map(slotToDesired),
+  }));
 }
 
 // ============================================
@@ -1150,8 +1264,8 @@ export async function loadBlocks(projectId: number): Promise<BlockData[]> {
   }));
 }
 
-// Full rewrite of a project's blocks and their slots, applied atomically in one
-// transaction via executeBatch (same rationale as saveGenCells/saveTemplates).
+// 分镜区写库。默认增量，forceFull 退回全量覆盖；同样是单个 executeBatch 事务
+// （与 saveGenCells / saveTemplates 同一套通道）。
 export async function saveBlocks(
   projectId: number,
   blocks: {
@@ -1159,29 +1273,23 @@ export async function saveBlocks(
     content: string | null;
     combineEnabled: boolean;
     slots: Omit<BlockSlotRecord, 'block_id' | 'position'>[];
-  }[]
-): Promise<void> {
-  const batch: BatchStatement[] = [];
-  batch.push([
-    'DELETE FROM block_slots WHERE block_id IN (SELECT id FROM blocks WHERE project_id = ?)',
-    [projectId],
-  ]);
-  batch.push(['DELETE FROM blocks WHERE project_id = ?', [projectId]]);
-  for (let i = 0; i < blocks.length; i++) {
-    const b = blocks[i];
-    batch.push([
-      'INSERT INTO blocks (id, project_id, position, content, combine_enabled) VALUES (?, ?, ?, ?, ?)',
-      [b.id, projectId, i, b.content, b.combineEnabled ? 1 : 0],
-    ]);
-    for (let si = 0; si < b.slots.length; si++) {
-      const s = b.slots[si];
-      batch.push([
-        'INSERT INTO block_slots (id, block_id, media_id, name, thumb, path, meta, type, position) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-        [s.id, b.id, s.media_id, s.name, s.thumb, s.path, s.meta, s.type, si],
-      ]);
-    }
-  }
-  await executeBatch(batch);
+  }[],
+  opts?: SaveAreaOptions
+): Promise<SaveAreaResult> {
+  return writeArea(BLOCK_AREA_SPEC, projectId, blocksToDesired(blocks), opts);
+}
+
+function blocksToDesired(
+  blocks: { id: string; content: string | null; combineEnabled: boolean; slots: AreaSlotInput[] }[]
+): DesiredContainer[] {
+  return blocks.map((block) => ({
+    id: block.id,
+    fields: {
+      content: block.content,
+      combine_enabled: block.combineEnabled ? 1 : 0,
+    },
+    slots: block.slots.map(slotToDesired),
+  }));
 }
 
 // ============================================
@@ -1225,6 +1333,7 @@ export function collectReferencedMediaIds(
 // full-common rows when the Home "包含全部通用素材" option is on.
 export interface ProjectExportPayload {
   name: string;
+  // 项目级面板布局 JSON（可能为 null：老项目 / 从未调整过布局）。
   panelLayout: string | null;
   genCells: GenCellWithSlots[];
   templates: GenTemplateData[];
@@ -1296,3 +1405,4 @@ export async function clearProjectMedia(projectId: number): Promise<void> {
     console.error('Failed to clear project uploads directory', err);
   }
 }
+
