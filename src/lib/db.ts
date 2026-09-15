@@ -23,6 +23,10 @@ export interface ProjectRecord {
   id: number;
   name: string;
   cover: string | null;
+  // 面板布局（显示的面板 + 拖拽分栏比例）的 JSON 快照，每个项目一份。NULL =
+  // 该项目还没有自己的布局，前端回退到 localStorage 里的默认模板 / 出厂默认。
+  // 不是业务数据，写入时不动 updated_at（避免影响首页排序 / 未保存标记）。
+  panel_layout: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -100,7 +104,7 @@ export async function getDb(): Promise<Database> {
   return db;
 }
 
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 const DEFAULT_STORAGE_SPACE_NAME = '默认空间';
 const DEFAULT_STORAGE_ROOT_FALLBACK = 'app-data://uploads';
 const DEFAULT_FORMAT_RULE_PATTERN = String.raw`@(图|图片|视频|音频)\d+`;
@@ -249,6 +253,20 @@ async function migrateSchema(database: Database): Promise<void> {
     statements.push(['PRAGMA user_version = 5', []]);
     await executeBatch(statements);
     version = 5;
+  }
+
+  // v6: 面板布局（4 个面板的显示开关 + 拖拽分栏比例）从全局 localStorage 升级
+  // 为「项目级」，落到 projects.panel_layout（JSON 文本，可空）。老项目该列为
+  // NULL，前端会回退到 localStorage 里那份旧全局值，升级后布局不会突变。
+  if (version < 6) {
+    const projectColumns = await tableColumns(database, 'projects');
+    const statements: BatchStatement[] = [];
+    if (!projectColumns.some((column) => column.name === 'panel_layout')) {
+      statements.push(['ALTER TABLE projects ADD COLUMN panel_layout TEXT', []]);
+    }
+    statements.push(['PRAGMA user_version = 6', []]);
+    await executeBatch(statements);
+    version = 6;
   }
 }
 
@@ -399,6 +417,22 @@ export async function touchProject(id: number): Promise<void> {
     'UPDATE projects SET updated_at = CURRENT_TIMESTAMP WHERE id = ?',
     [id]
   );
+}
+
+// 面板布局：不是业务数据，所以刻意不更新 updated_at（不影响首页排序，也不参与
+// Ctrl+S 的手动保存语义）。json 传 null 表示清空该项目的布局。
+export async function getProjectPanelLayout(projectId: number): Promise<string | null> {
+  const database = await getDb();
+  const rows = await database.select<{ panel_layout: string | null }[]>(
+    'SELECT panel_layout FROM projects WHERE id = ?',
+    [projectId]
+  );
+  return rows[0]?.panel_layout ?? null;
+}
+
+export async function setProjectPanelLayout(projectId: number, json: string | null): Promise<void> {
+  const database = await getDb();
+  await database.execute('UPDATE projects SET panel_layout = ? WHERE id = ?', [json, projectId]);
 }
 
 export async function deleteProject(id: number): Promise<void> {
@@ -1191,6 +1225,7 @@ export function collectReferencedMediaIds(
 // full-common rows when the Home "包含全部通用素材" option is on.
 export interface ProjectExportPayload {
   name: string;
+  panelLayout: string | null;
   genCells: GenCellWithSlots[];
   templates: GenTemplateData[];
   blocks: BlockData[];
@@ -1208,6 +1243,7 @@ export async function exportProjectPayload(
     [projectId]
   );
   const name = projRows[0]?.name ?? `项目${projectId}`;
+  const panelLayout = projRows[0]?.panel_layout ?? null;
   const genCells = await loadGenCells(projectId);
   const templates = await loadTemplates(projectId);
   const blocks = await loadBlocks(projectId);
@@ -1240,7 +1276,7 @@ export async function exportProjectPayload(
   const media = [...projectMedia, ...referencedCommon];
   const projectSpaceIds = [...new Set(media.filter((m) => m.scope === 'project').map((m) => m.storage_space_id))];
   const folders = (await Promise.all(projectSpaceIds.map((spaceId) => listFolders(spaceId, 'project', projectId)))).flat();
-  return { name, genCells, templates, blocks, media, folders };
+  return { name, panelLayout, genCells, templates, blocks, media, folders };
 }
 
 // Overwrite-import prep: wipe a target project's material library (DB rows +

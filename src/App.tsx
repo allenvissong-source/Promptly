@@ -17,6 +17,7 @@ import {
   type HSizes,
   type VSizes,
   type PanelKey,
+  type CardColumnKey,
 } from './context/PanelLayoutContext';
 import { mergeAllPrompts } from './components/gen/serializePrompt';
 import { expandTemplateRef } from './components/gen/roleUtils';
@@ -836,7 +837,8 @@ function TopBarInner() {
 // panels show; the last remaining panel's toggle is locked so you can never
 // close everything. "还原默认布局" resets both visibility and drag sizes.
 function PanelMenu() {
-  const { visible, togglePanel, isLastVisible, resetLayout } = usePanelLayout();
+  const { visible, togglePanel, toggleCardColumn, isLastVisible, resetLayout } =
+    usePanelLayout();
   const { showFormatToolbar, toggleFormatToolbar } = useGenSettings();
   const [open, setOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -854,6 +856,12 @@ function PanelMenu() {
     { key: 'gen', label: '生图区' },
     { key: 'template', label: '模板区' },
     { key: 'storyboard', label: '分镜区' },
+  ];
+
+  // 卡片内部的左右两列（不是面板），所以不吃「至少保留一个面板」的锁。
+  const cardItems: { key: CardColumnKey; label: string; title: string }[] = [
+    { key: 'cardImages', label: '图片区域', title: '卡片左侧的图片/视频列表' },
+    { key: 'cardText', label: '文字区域', title: '卡片右侧的文字内容' },
   ];
 
   return (
@@ -882,6 +890,29 @@ function PanelMenu() {
                     ? 'text-[#666666] cursor-default'
                     : 'text-[#E5E5E5] hover:bg-[#333333] cursor-pointer'
                 }`}
+              >
+                <span
+                  className={`flex items-center justify-center w-4 h-4 rounded border ${
+                    on
+                      ? 'bg-[#2EC4B6] border-[#2EC4B6] text-[#1E1E1E]'
+                      : 'border-[#555555] text-transparent'
+                  }`}
+                >
+                  <Check size={12} />
+                </span>
+                <span className="flex-1">{label}</span>
+              </button>
+            );
+          })}
+          <div className="my-1 h-px bg-[#3D3D3D]" />
+          {cardItems.map(({ key, label, title }) => {
+            const on = visible[key];
+            return (
+              <button
+                key={key}
+                onClick={() => toggleCardColumn(key)}
+                title={title}
+                className="w-full flex items-center gap-2 text-left px-3 py-2 text-[12px] text-[#E5E5E5] hover:bg-[#333333] cursor-pointer"
               >
                 <span
                   className={`flex items-center justify-center w-4 h-4 rounded border ${

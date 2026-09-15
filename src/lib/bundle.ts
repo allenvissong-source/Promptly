@@ -18,6 +18,7 @@ import {
   type GenCellWithSlots,
   type GenTemplateData,
   type BlockData,
+  setProjectPanelLayout,
 } from './db';
 
 // ============================================================================
@@ -60,6 +61,9 @@ export interface FolderManifest {
 
 export interface ProjectManifest {
   name: string;
+  // 项目级面板布局 JSON（v6 起）。老 bundle 没有这个字段 → undefined，导入时
+  // 当作 NULL 处理（目标项目保持自己的 / 默认布局），不报错。
+  panelLayout?: string | null;
   // The three areas verbatim from the DB load shape (content kept as JSON
   // strings, deterministic slot ids intact) so a round-trip is lossless.
   genCells: GenCellWithSlots[];
@@ -195,6 +199,7 @@ export async function exportBundle(
 
     projects.push({
       name: payload.name,
+      panelLayout: payload.panelLayout,
       genCells: payload.genCells,
       templates: payload.templates,
       blocks: payload.blocks,
@@ -573,6 +578,12 @@ export async function importBundle(
     await saveGenCells(targetId, genCells);
     await saveTemplates(targetId, templates);
     await saveBlocks(targetId, blocks);
+    // 2e. 项目级面板布局：只在 bundle 里带了这份数据时写入（老 zip 没有该字段 →
+    // 当作 NULL，目标项目保留原有 / 默认布局）。布局是脏数据也无所谓，
+    // PanelLayoutContext 读取时会逐字段校验并安全回退。
+    if (typeof p.panelLayout === 'string' && p.panelLayout) {
+      await setProjectPanelLayout(targetId, p.panelLayout);
+    }
 
     if (overwrote) summary.overwritten++;
     else summary.imported++;

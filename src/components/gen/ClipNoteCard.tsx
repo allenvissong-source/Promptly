@@ -20,6 +20,7 @@ import type { ChipMode } from '../../context/GenSettingsContext';
 import GenPromptEditor from './GenPromptEditor';
 import type { ResolvedTemplateRef } from './GenPromptEditor';
 import type { TemplateCandidate } from './mentionSuggestion';
+import { contentHasTemplateRef } from './templateRefScan';
 import { serializePromptContent } from './serializePrompt';
 import { isCardCollapsed, setCardCollapsed } from '../../lib/collapse';
 import {
@@ -29,6 +30,7 @@ import {
   EMPTY_STYLE,
 } from '../../lib/richClipboard';
 import { useMediaObjectUrl } from '../../lib/mediaSrc';
+import { usePanelLayout } from '../../context/PanelLayoutContext';
 
 interface Props {
   // The ordered LEFT image list. This is BOTH the GenImages scope (chips
@@ -106,6 +108,8 @@ interface Props {
 // Ordinals and chip labels resolve against `images`, which is also this card's
 // GenImages scope. Shared by the gen area (wide image / narrow note) and the
 // template area (fixed image / wide note); the differences are all props.
+// 顶栏「显示」菜单可以整体隐藏其中任意一列（图片区域 / 文字区域），隐藏即不渲染，
+// 剩下的一列撑满；两列都关时只留标题栏。
 export default function ClipNoteCard({
   images,
   note,
@@ -134,6 +138,20 @@ export default function ClipNoteCard({
   const genSettings = useGenSettings();
   const { chipMode, copyAsTableCell, applyReplaceOnExport } = genSettings;
   const exportFormatRules = exportFormatRulesFromSettings(genSettings);
+  // 顶栏「显示」菜单里的「图片区域 / 文字区域」开关（项目级、随 zip 导出导入）。
+  // 关掉某一列就直接不渲染它，剩下的那列撑满整行；两列都关时只留标题栏。
+  const { visible } = usePanelLayout();
+  const showImageCol = visible.cardImages;
+  const showTextCol = visible.cardText;
+  // 只剩一列时用 flex-1 撑满，而不是继续吃各区域传进来的固定宽度（否则会留白）。
+  const imageColClass = showTextCol ? imageColClassName : 'flex-1';
+  const textColClass = showImageCol
+    ? `border-l border-[#3D3D3D] shrink-0 ${textColClassName}`
+    : 'flex-1';
+  // 生图卡片没有顶部 header，拖拽手柄 / 删除格子 / 双击折叠都挂在右列的 noteHeader
+  // 上；文字区域被隐藏时把它提到卡片顶部，避免这些交互跟着右列一起消失。
+  const promotedNoteHeader =
+    !showTextCol && !header && noteHeader ? noteHeader : null;
   const [collapsed, setCollapsed] = useState(() =>
     cardId ? isCardCollapsed(cardId) : false
   );
@@ -216,16 +234,43 @@ export default function ClipNoteCard({
   };
 
   const [copiedNote, setCopiedNote] = useState<ClipboardCopyStatus | null>(null);
-  const handleCopyText = async () => {
+  // 「仅本卡」按钮有自己的反馈 state，和「复制」互不影响（否则点一个会两个都打勾）。
+  const [copiedSelfOnly, setCopiedSelfOnly] = useState<ClipboardCopyStatus | null>(
+    null
+  );
+  // 正文里有 @模板引用时才渲染「仅本卡」；数据源就是 note prop，编辑器每次
+  // onUpdate 都会回写 store，因此插入/删除 chip 后按钮会实时出现/消失。
+  const hasTemplateRef = contentHasTemplateRef(note);
+  // expand=false 时不传 resolveTemplateRef，走 serializePromptContent 里
+  // `if (!resolved)` 的现成分支：chip 消失、前后文合并。其余加工完全一致。
+  const copyText = async (
+    expandTemplateRef: boolean,
+    setStatus: (s: ClipboardCopyStatus | null) => void
+  ) => {
     const body = serializePromptContent(
       note,
       imagesRef.current,
       chipModeRef.current,
-      resolveTemplateRef
+      expandTemplateRef ? resolveTemplateRef : undefined
     );
     const title = copyTitleRef.current?.trim();
     let text = body.plainText;
     let styles = [...body.styles];
+    // 「仅本卡」：卡片正文里每个 @模板 chip 前后通常预留了空行用来放展开的模板，
+    // 不展开时这些空行会变成结果首尾的空白，这里把首尾空白行裁掉（styles 是逐字符
+    // 对齐的，必须同步 slice）。中间的空行保持原样，不动用户排版。
+    if (!expandTemplateRef) {
+      const lead = text.length - text.replace(/^[\s\u00a0]+/, '').length;
+      if (lead > 0) {
+        text = text.slice(lead);
+        styles = styles.slice(lead);
+      }
+      const trail = text.length - text.replace(/[\s\u00a0]+$/, '').length;
+      if (trail > 0) {
+        text = text.slice(0, text.length - trail);
+        styles = styles.slice(0, text.length);
+      }
+    }
     if (title && title !== '未命名模板') {
       const titleText = `# ${title}\n`;
       const titleStyles = Array.from({ length: titleText.length }, () => ({ ...EMPTY_STYLE }));
@@ -237,9 +282,11 @@ export default function ClipNoteCard({
       initialStyles: styles,
       applyReplace: applyReplaceRef.current,
     });
-    setCopiedNote(result.status);
-    setTimeout(() => setCopiedNote(null), 1500);
+    setStatus(result.status);
+    setTimeout(() => setStatus(null), 1500);
   };
+  const handleCopyText = () => copyText(true, setCopiedNote);
+  const handleCopySelfOnly = () => copyText(false, setCopiedSelfOnly);
 
   // Copy every image in this card to the system clipboard as a native FILE LIST
   // (Windows CF_HDROP), so apps like QQ/WeChat can paste all of them at once.
@@ -273,22 +320,24 @@ export default function ClipNoteCard({
             : 'border-[#3D3D3D] bg-[#252525]'
         }`}
       >
-          {header ? (
+          {header || promotedNoteHeader ? (
             <div
               className="shrink-0"
               onDoubleClick={handleHeaderDoubleClick}
               title={cardId ? '双击标题栏空白处折叠/展开' : undefined}
             >
-              {header}
+              {header ?? promotedNoteHeader}
             </div>
           ) : null}
+          {showImageCol || showTextCol ? (
           <div
             className={`flex flex-1 gap-2 min-w-0 ${
               collapsed ? 'max-h-[120px] overflow-y-auto scrollbar-dark' : ''
             }`}
         >
           {/* Left: clip rows + a footer to copy all of this card's images */}
-          <div className={`flex flex-col min-w-0 ${imageColClassName}`}>
+          {showImageCol ? (
+          <div className={`flex flex-col min-w-0 ${imageColClass}`}>
             <div ref={listRef} className="flex-1 flex flex-col gap-1.5 p-2 min-w-0">
               {images.map((item, index) => (
                 <div
@@ -353,10 +402,12 @@ export default function ClipNoteCard({
               </div>
             ) : null}
           </div>
+          ) : null}
 
           {/* Right: this card's @ note box */}
+          {showTextCol ? (
           <div
-            className={`border-l border-[#3D3D3D] flex flex-col shrink-0 min-w-0 ${textColClassName}`}
+            className={`flex flex-col min-w-0 ${textColClass}`}
           >
             {noteHeader ? (
               // 生图卡片没有顶部 header，折叠由这里的“备注”栏双击触发。
@@ -405,6 +456,33 @@ export default function ClipNoteCard({
             </div>
             {showCopyText ? (
               <div className="flex justify-end px-2 pb-1.5">
+                {hasTemplateRef ? (
+                  <button
+                    className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] transition-all cursor-pointer ${
+                      copiedSelfOnly
+                        ? 'text-[#2EC4B6] bg-[#2EC4B6]/10'
+                        : 'text-[#8A8A8A] hover:text-[#2EC4B6] hover:bg-[#333333]'
+                    }`}
+                    onClick={handleCopySelfOnly}
+                    title="仅复制本卡内容，不展开 @模板引用"
+                  >
+                    {copiedSelfOnly ? (
+                      <>
+                        <Check size={10} />
+                        <span>
+                          {copiedSelfOnly === 'rich'
+                            ? '已复制本卡'
+                            : '已复制本卡纯文本'}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy size={10} />
+                        <span>仅本卡</span>
+                      </>
+                    )}
+                  </button>
+                ) : null}
                 <button
                   className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] transition-all cursor-pointer ${
                     copiedNote
@@ -431,7 +509,9 @@ export default function ClipNoteCard({
               </div>
             ) : null}
           </div>
+          ) : null}
         </div>
+          ) : null}
       </div>
     </GenImagesProvider>
   );
