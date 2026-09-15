@@ -6,6 +6,7 @@ use tauri_plugin_sql::{DbInstances, DbPool};
 
 #[cfg(target_os = "macos")]
 mod mac_titlebar;
+mod mcp_sidecar;
 
 const DB_URL: &str = "sqlite:data.db";
 const STORAGE_MARKER: &str = ".promptly-storage.json";
@@ -1313,6 +1314,45 @@ async fn file_hash(path: String) -> Result<String, String> {
 // back, so a full-rewrite save (DELETE-all + re-INSERT) can never leave a
 // partially-written project. `db` is the same URL passed to Database.load
 // (e.g. "sqlite:data.db").
+// ---- MCP server 进程管理 ------------------------------------------------
+// 只管 HTTP 传输那条：豆包这类客户端只会连 URL、不会启动进程，所以得有人先把
+// server 跑起来。stdio 那条不需要管 —— 客户端自己会拉起子进程。
+
+#[tauri::command]
+async fn mcp_status(
+    app: AppHandle,
+    state: tauri::State<'_, mcp_sidecar::McpState>,
+) -> Result<mcp_sidecar::McpStatus, String> {
+    Ok(state.status(&app))
+}
+
+#[tauri::command]
+async fn mcp_start(
+    app: AppHandle,
+    state: tauri::State<'_, mcp_sidecar::McpState>,
+    port: Option<u16>,
+) -> Result<mcp_sidecar::McpStatus, String> {
+    let port = port.unwrap_or(mcp_sidecar::DEFAULT_PORT);
+    match state.start(&app, port) {
+        Ok(status) => Ok(status),
+        Err(err) => {
+            // 失败原因留在 state 里，设置界面轮询 status 时能读到，
+            // 不至于只弹一次就丢失。
+            state.set_error(err.clone());
+            Err(err)
+        }
+    }
+}
+
+#[tauri::command]
+async fn mcp_stop(
+    app: AppHandle,
+    state: tauri::State<'_, mcp_sidecar::McpState>,
+) -> Result<mcp_sidecar::McpStatus, String> {
+    state.stop();
+    Ok(state.status(&app))
+}
+
 #[tauri::command]
 async fn execute_batch(
     db_instances: tauri::State<'_, DbInstances>,
@@ -1691,6 +1731,7 @@ pub fn run() {
         .plugin(tauri_plugin_sql::Builder::new().build())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
+        .manage(mcp_sidecar::McpState::default())
         .invoke_handler(tauri::generate_handler![
             get_default_storage_root,
             validate_storage_space,
@@ -1718,7 +1759,10 @@ pub fn run() {
             set_ffmpeg_override,
             download_ffmpeg,
             generate_thumbnail,
-            transcode_preview
+            transcode_preview,
+            mcp_status,
+            mcp_start,
+            mcp_stop
         ])
         .setup(|app| {
             // Window chrome strategy — the same "keep the native frame, draw your
@@ -1802,6 +1846,16 @@ pub fn run() {
             }
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        // 用 build + run 而不是直接 .run()，是为了拿到 Exit 事件：MCP server 是
+        // 我们 spawn 的子进程，App 退出时必须收掉，否则会留下占着端口的孤儿进程，
+        // 下次启动就会因端口被占而失败。
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                app_handle
+                    .state::<mcp_sidecar::McpState>()
+                    .stop();
+            }
+        });
 }

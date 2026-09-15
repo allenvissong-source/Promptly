@@ -9,7 +9,8 @@
     "smoke": "tsx src/smoke.ts",
     "e2e": "tsx src/e2e.ts",
     "start": "tsx src/index.ts",
-    "start:http": "tsx src/index.ts --http"
+    "start:http": "tsx src/index.ts --http",
+    "bundle": "node build.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",

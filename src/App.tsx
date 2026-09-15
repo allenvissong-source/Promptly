@@ -1,5 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { getCurrentWindow } from '@tauri-apps/api/window';
+import { invoke } from '@tauri-apps/api/core';
 import { confirm, save as saveDialog, message } from '@tauri-apps/plugin-dialog';
 import { ProjectProvider, useProject } from './context/ProjectContext';
 import logoUrl from './assets/logo.png';
@@ -1104,6 +1105,17 @@ function ProjectWorkspace() {
 
 function AppShell() {
   const { view } = useProject();
+
+  // MCP 服务（HTTP）：用户在设置里开过就随 App 启动一起拉起，关 App 时 Rust 侧的
+  // Exit 钩子会收掉子进程。默认不开 —— 一个后台端口不该在用户没要求时就监听。
+  // 只管 HTTP 这条；stdio 那条由客户端自己启动，App 不插手。
+  useEffect(() => {
+    if (localStorage.getItem('promptly.mcpHttpEnabled') !== 'true') return;
+    // 失败不打扰用户（可能只是没装 Node），设置面板里会显示具体原因。
+    void invoke('mcp_start').catch((err) => {
+      console.warn('MCP 服务自动启动失败', err);
+    });
+  }, []);
 
   // Safety net against the WebView navigating away when a DOM drag ends over
   // the window (e.g. dragging an <img>): swallow dragstart/dragover/drop at the

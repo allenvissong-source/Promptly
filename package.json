@@ -10,10 +10,11 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "ffmpeg:fetch": "node tools/fetch-ffmpeg.mjs",
-    "pretauri:dev": "node tools/fetch-ffmpeg.mjs",
+    "pretauri:dev": "node tools/fetch-ffmpeg.mjs && npm run mcp:bundle",
     "tauri:dev": "tauri dev",
-    "pretauri:build": "node tools/fetch-ffmpeg.mjs",
-    "tauri:build": "tauri build"
+    "pretauri:build": "node tools/fetch-ffmpeg.mjs && npm run mcp:bundle",
+    "tauri:build": "tauri build",
+    "mcp:bundle": "npm --prefix mcp-server run bundle"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",

@@ -25,6 +25,7 @@ import {
   type StorageSpace,
 } from '../../lib/db';
 import { useGenSettings, AUTO_SAVE_INTERVAL_OPTIONS, type AutoSaveIntervalMs, type ChipMode } from '../../context/GenSettingsContext';
+import McpSettings from './McpSettings';
 
 interface SettingsModalProps {
   open: boolean;
@@ -423,6 +424,7 @@ export default function SettingsModal({ open: isOpen, onClose }: SettingsModalPr
           <div className="min-h-0 flex-1 overflow-y-auto p-5 scrollbar-dark">
             {section === 'general' && (
               <section className="space-y-5">
+                <McpSettings />
                 <div className="rounded-xl border border-[#3D3D3D] bg-[#2A2A2A] p-4">
                   <label className="flex items-start justify-between gap-4">
                     <div>

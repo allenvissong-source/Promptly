@@ -39,6 +39,9 @@ video-prompt-engine-src.zip
 # Bundled ffmpeg sidecar binaries (fetched by tools/fetch-ffmpeg.mjs, ~65MB each)
 src-tauri/binaries/
 
+# MCP server 打包产物（由 mcp-server/build.mjs 生成，随 App 分发）
+mcp-server/dist-bundle/
+
 # Local packaging artifacts
 Promptly-source*/
 Promptly-source*.zip
