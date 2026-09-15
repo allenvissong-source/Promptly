@@ -132,7 +132,7 @@ export default function ClipNoteCard({
   onNoteChange,
 }: Props) {
   const genSettings = useGenSettings();
-  const { chipMode, copyAsTableCell } = genSettings;
+  const { chipMode, copyAsTableCell, applyReplaceOnExport } = genSettings;
   const exportFormatRules = exportFormatRulesFromSettings(genSettings);
   const [collapsed, setCollapsed] = useState(() =>
     cardId ? isCardCollapsed(cardId) : false
@@ -164,6 +164,8 @@ export default function ClipNoteCard({
   chipModeRef.current = chipMode;
   const copyAsTableCellRef = useRef(copyAsTableCell);
   copyAsTableCellRef.current = copyAsTableCell;
+  const applyReplaceRef = useRef(applyReplaceOnExport);
+  applyReplaceRef.current = applyReplaceOnExport;
   const copyTitleRef = useRef(copyTitle);
   copyTitleRef.current = copyTitle;
   const getCandidatesRef = useRef(getCandidates);
@@ -233,6 +235,7 @@ export default function ClipNoteCard({
     const result = await copyRichText(text, exportFormatRules, { 
       tableCell: copyAsTableCellRef.current,
       initialStyles: styles,
+      applyReplace: applyReplaceRef.current,
     });
     setCopiedNote(result.status);
     setTimeout(() => setCopiedNote(null), 1500);

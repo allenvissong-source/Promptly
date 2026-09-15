@@ -12,7 +12,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { buildRichClipboard } from '../../lib/richClipboard';
+import { buildRichClipboard, type ExportRuleMode } from '../../lib/richClipboard';
 import {
   createExportFormatRule,
   createStorageSpace,
@@ -44,6 +44,9 @@ type DraftRule = {
   underline: boolean;
   strike: boolean;
   textColor: string;
+  // 'style' = 命中片段着色；'replace' = 复制/导出时把命中片段换成 replacement
+  mode: ExportRuleMode;
+  replacement: string;
 };
 
 const SECTION_ITEMS: { key: SectionKey; label: string }[] = [
@@ -67,6 +70,8 @@ function toDraftRule(rule: ExportFormatRule): DraftRule {
     underline: rule.underline !== 0,
     strike: rule.strike !== 0,
     textColor: rule.text_color || '#ff0000',
+    mode: rule.rule_mode === 'replace' ? 'replace' : 'style',
+    replacement: rule.replacement ?? '',
   };
 }
 
@@ -115,6 +120,8 @@ function ruleToDb(rule: DraftRule): Omit<ExportFormatRule, 'id' | 'created_at' |
     underline: rule.underline ? 1 : 0,
     strike: rule.strike ? 1 : 0,
     text_color: rule.textColor || '#ff0000',
+    rule_mode: rule.mode,
+    replacement: rule.replacement,
   };
 }
 
@@ -127,6 +134,8 @@ export default function SettingsModal({ open: isOpen, onClose }: SettingsModalPr
     setShowFormatToolbar,
     copyAsTableCell,
     setCopyAsTableCell,
+    applyReplaceOnExport,
+    setApplyReplaceOnExport,
     storageSpaces,
     activeStorageSpaceId,
     activeStorageSpace,
@@ -283,6 +292,8 @@ export default function SettingsModal({ open: isOpen, onClose }: SettingsModalPr
         underline: false,
         strike: false,
         textColor: '#ff0000',
+        mode: 'style',
+        replacement: '',
       },
     ]);
   }
@@ -352,6 +363,8 @@ export default function SettingsModal({ open: isOpen, onClose }: SettingsModalPr
         underline: rule.underline,
         strike: rule.strike,
         textColor: rule.textColor || null,
+        mode: rule.mode,
+        replacement: rule.replacement,
       }))
     );
   }, [rules]);
@@ -587,6 +600,18 @@ export default function SettingsModal({ open: isOpen, onClose }: SettingsModalPr
                     className="h-4 w-4 shrink-0 accent-[#2EC4B6]"
                   />
                 </label>
+                <label className="flex items-center justify-between rounded-xl border border-[#3D3D3D] bg-[#2A2A2A] p-4">
+                  <div className="pr-4">
+                    <div className="text-[14px] font-medium text-[#E5E5E5]">复制 / 导出时自动执行替换规则</div>
+                    <div className="mt-1 text-[12px] text-[#8A8A8A]">开启后，下方「模式=查找替换」的规则会在复制文本（单卡复制 / 复制全部）时自动生效；编辑器里的原文不会被改动。关闭则只保留着色规则。</div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={applyReplaceOnExport}
+                    onChange={(event) => setApplyReplaceOnExport(event.target.checked)}
+                    className="h-4 w-4 shrink-0 accent-[#2EC4B6]"
+                  />
+                </label>
                 <div className="rounded-xl border border-[#3D3D3D] bg-[#2A2A2A] p-4">
                   <div className="mb-3 flex items-center justify-between">
                     <div>
@@ -613,13 +638,37 @@ export default function SettingsModal({ open: isOpen, onClose }: SettingsModalPr
                             </div>
                           </div>
                           {patternError && <div className="mt-1 text-[11px] text-[#FF8A80]">{patternError}</div>}
+                          <div className="mt-2 grid grid-cols-[auto_1fr] items-center gap-2">
+                            <select
+                              value={rule.mode}
+                              onChange={(e) => patchRule(index, { mode: e.target.value as ExportRuleMode })}
+                              className="settings-input"
+                              title="着色：只给命中片段上样式；查找替换：复制时把命中片段换成右侧文本"
+                            >
+                              <option value="style">模式：着色</option>
+                              <option value="replace">模式：查找替换</option>
+                            </select>
+                            {rule.mode === 'replace' ? (
+                              <input
+                                value={rule.replacement}
+                                onChange={(e) => patchRule(index, { replacement: e.target.value })}
+                                placeholder="替换为（支持 $1 捕获组、$& 整段、\n 换行）"
+                                className="settings-input"
+                              />
+                            ) : (
+                              <div className="text-[11px] text-[#8A8A8A]">着色模式不改变文本，只在复制的富文本里给命中片段加样式。</div>
+                            )}
+                          </div>
+                          {rule.mode === 'replace' && (
+                            <div className="mt-1 text-[11px] text-[#8A8A8A]">替换按规则顺序依次执行（后一条看到前一条的结果），正则以 gm 匹配，^ / $ 按行生效；替换为空即为「删除命中内容」。</div>
+                          )}
                           <div className="mt-3 flex flex-wrap items-center gap-3 text-[12px] text-[#BDBDBD]">
                             <label className="rule-toggle"><input type="checkbox" checked={rule.enabled} onChange={(e) => patchRule(index, { enabled: e.target.checked })} />启用</label>
-                            <label className="rule-toggle"><input type="checkbox" checked={rule.bold} onChange={(e) => patchRule(index, { bold: e.target.checked })} />粗体</label>
-                            <label className="rule-toggle"><input type="checkbox" checked={rule.italic} onChange={(e) => patchRule(index, { italic: e.target.checked })} />斜体</label>
-                            <label className="rule-toggle"><input type="checkbox" checked={rule.underline} onChange={(e) => patchRule(index, { underline: e.target.checked })} />下划线</label>
-                            <label className="rule-toggle"><input type="checkbox" checked={rule.strike} onChange={(e) => patchRule(index, { strike: e.target.checked })} />删除线</label>
-                            <label className="flex items-center gap-2">文字颜色<input type="color" value={rule.textColor || '#ff0000'} onChange={(e) => patchRule(index, { textColor: e.target.value })} className="h-6 w-8 rounded border-0 bg-transparent" /></label>
+                            <label className={`rule-toggle ${rule.mode === 'replace' ? 'opacity-40' : ''}`}><input type="checkbox" disabled={rule.mode === 'replace'} checked={rule.bold} onChange={(e) => patchRule(index, { bold: e.target.checked })} />粗体</label>
+                            <label className={`rule-toggle ${rule.mode === 'replace' ? 'opacity-40' : ''}`}><input type="checkbox" disabled={rule.mode === 'replace'} checked={rule.italic} onChange={(e) => patchRule(index, { italic: e.target.checked })} />斜体</label>
+                            <label className={`rule-toggle ${rule.mode === 'replace' ? 'opacity-40' : ''}`}><input type="checkbox" disabled={rule.mode === 'replace'} checked={rule.underline} onChange={(e) => patchRule(index, { underline: e.target.checked })} />下划线</label>
+                            <label className={`rule-toggle ${rule.mode === 'replace' ? 'opacity-40' : ''}`}><input type="checkbox" disabled={rule.mode === 'replace'} checked={rule.strike} onChange={(e) => patchRule(index, { strike: e.target.checked })} />删除线</label>
+                            <label className={`flex items-center gap-2 ${rule.mode === 'replace' ? 'opacity-40' : ''}`}>文字颜色<input type="color" disabled={rule.mode === 'replace'} value={rule.textColor || '#ff0000'} onChange={(e) => patchRule(index, { textColor: e.target.value })} className="h-6 w-8 rounded border-0 bg-transparent" /></label>
                           </div>
                         </div>
                       );
@@ -628,6 +677,7 @@ export default function SettingsModal({ open: isOpen, onClose }: SettingsModalPr
                 </div>
                 <div className="rounded-xl border border-[#3D3D3D] bg-[#2A2A2A] p-4">
                   <div className="mb-2 text-[14px] font-medium text-[#E5E5E5]">示例预览</div>
+                  <div className="mb-2 text-[11px] text-[#8A8A8A]">原文：{SAMPLE_TEXT}{preview.replacements > 0 ? ` · 已应用 ${preview.replacements} 处替换` : ''}</div>
                   <div className="rounded-lg bg-[#1E1E1E] p-3 text-[13px] text-[#E5E5E5]" dangerouslySetInnerHTML={{ __html: preview.html.replace(/^<!doctype html><html><head><meta charset="utf-8"><\/head><body>|<\/body><\/html>$/g, '') }} />
                   {preview.errors.length > 0 && (
                     <div className="mt-2 text-[11px] text-[#FF8A80]">

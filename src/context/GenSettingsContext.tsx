@@ -24,6 +24,8 @@ export type ChipMode = 'code' | 'name';
 const CHIP_MODE_KEY = 'promptly.chipMode';
 const SHOW_FORMAT_TOOLBAR_KEY = 'promptly.showFormatToolbar';
 const COPY_AS_TABLE_CELL_KEY = 'promptly.copyAsTableCell';
+const APPLY_REPLACE_ON_EXPORT_KEY = 'promptly.applyReplaceOnExport';
+
 
 function readInitialChipMode(): ChipMode {
   try {
@@ -57,6 +59,19 @@ function readInitialCopyAsTableCell(): boolean {
   return true;
 }
 
+function readInitialApplyReplaceOnExport(): boolean {
+  try {
+    const v = localStorage.getItem(APPLY_REPLACE_ON_EXPORT_KEY);
+    if (v === '0') return false;
+    if (v === '1') return true;
+  } catch {
+    // localStorage unavailable — fall back to default (on).
+  }
+  return true;
+}
+
+
+
 function parseChipMode(value: string | null, fallback: ChipMode): ChipMode {
   return value === 'code' || value === 'name' ? value : fallback;
 }
@@ -80,6 +95,8 @@ function dbRulesToClipboardRules(rules: Awaited<ReturnType<typeof listExportForm
     underline: r.underline !== 0,
     strike: r.strike !== 0,
     textColor: r.text_color || null,
+    mode: r.rule_mode === 'replace' ? 'replace' : 'style',
+    replacement: r.replacement ?? '',
   }));
 }
 
@@ -95,6 +112,12 @@ interface GenSettingsValue {
   // （单元格内保留换行），而不是每个换行拆成一行。默认开启。
   copyAsTableCell: boolean;
   setCopyAsTableCell: (v: boolean) => void;
+  // 复制 / 导出文本时是否自动执行「替换类」格式规则（设置 → 复制格式里 mode
+  // 为 replace 的规则）。默认开启；关掉后复制结果与旧版本完全一致。
+  applyReplaceOnExport: boolean;
+  setApplyReplaceOnExport: (v: boolean) => void;
+  // 关窗时也回到「有未保存修改」的二次确认弹窗。
+  // 空闲防抖间隔：停止编辑多久后落库（1.5 秒 / 5 秒，默认 1.5 秒）。
   storageSpaces: StorageSpace[];
   activeStorageSpaceId: number | null;
   activeStorageSpace: StorageSpace | null;
@@ -121,6 +144,9 @@ export function GenSettingsProvider({ children }: { children: ReactNode }) {
   const [copyAsTableCellState, setCopyAsTableCellState] = useState<boolean>(
     readInitialCopyAsTableCell
   );
+  const [applyReplaceOnExportState, setApplyReplaceOnExportState] = useState<boolean>(
+    readInitialApplyReplaceOnExport
+  );
   const [storageSpaces, setStorageSpaces] = useState<StorageSpace[]>([]);
   const [activeStorageSpaceId, setActiveStorageSpaceId] = useState<number | null>(null);
   const [exportFormatRules, setExportFormatRules] = useState<ClipboardExportFormatRule[]>(DEFAULT_EXPORT_FORMAT_RULES);
@@ -132,11 +158,12 @@ export function GenSettingsProvider({ children }: { children: ReactNode }) {
     setLoading(true);
     try {
       await initDb();
-      const [spaces, chipSetting, toolbarSetting, tableCellSetting, activeSetting, dbRules] = await Promise.all([
+      const [spaces, chipSetting, toolbarSetting, tableCellSetting, replaceSetting, activeSetting, dbRules] = await Promise.all([
         listStorageSpaces(),
         getAppSetting('chip_mode'),
         getAppSetting('show_format_toolbar'),
         getAppSetting('copy_as_table_cell'),
+        getAppSetting('apply_replace_on_export'),
         getAppSetting('active_storage_space_id'),
         listExportFormatRules(),
       ]);
@@ -148,17 +175,21 @@ export function GenSettingsProvider({ children }: { children: ReactNode }) {
       const localChip = readInitialChipMode();
       const localToolbar = readInitialShowFormatToolbar();
       const localTableCell = readInitialCopyAsTableCell();
+      const localApplyReplace = readInitialApplyReplaceOnExport();
       const nextChip = parseChipMode(chipSetting, localChip);
       const nextToolbar = parseBool(toolbarSetting, localToolbar);
       const nextTableCell = parseBool(tableCellSetting, localTableCell);
+      const nextApplyReplace = parseBool(replaceSetting, localApplyReplace);
       if (chipSetting == null) await setAppSetting('chip_mode', nextChip);
       if (toolbarSetting == null) await setAppSetting('show_format_toolbar', String(nextToolbar));
       if (tableCellSetting == null) await setAppSetting('copy_as_table_cell', String(nextTableCell));
+      if (replaceSetting == null) await setAppSetting('apply_replace_on_export', String(nextApplyReplace));
       setStorageSpaces(spaces);
       setActiveStorageSpaceId(Number.isFinite(nextActiveId) ? nextActiveId : null);
       setChipModeState(nextChip);
       setShowFormatToolbarState(nextToolbar);
       setCopyAsTableCellState(nextTableCell);
+      setApplyReplaceOnExportState(nextApplyReplace);
       setExportFormatRules(dbRulesToClipboardRules(dbRules));
     } catch (err) {
       console.error('Failed to load gen settings', err);
@@ -185,6 +216,13 @@ export function GenSettingsProvider({ children }: { children: ReactNode }) {
     setCopyAsTableCellState(value);
     void setAppSetting('copy_as_table_cell', String(value)).catch((err) => console.error('Persist copy-as-table-cell failed', err));
   }, []);
+
+  const setApplyReplaceOnExport = useCallback((value: boolean) => {
+    setApplyReplaceOnExportState(value);
+    void setAppSetting('apply_replace_on_export', String(value)).catch((err) => console.error('Persist apply-replace-on-export failed', err));
+  }, []);
+
+
 
   const toggleChipMode = useCallback(
     () => setChipMode(chipModeState === 'code' ? 'name' : 'code'),
@@ -221,6 +259,8 @@ export function GenSettingsProvider({ children }: { children: ReactNode }) {
         toggleFormatToolbar,
         copyAsTableCell: copyAsTableCellState,
         setCopyAsTableCell,
+        applyReplaceOnExport: applyReplaceOnExportState,
+        setApplyReplaceOnExport,
         storageSpaces,
         activeStorageSpaceId,
         activeStorageSpace,

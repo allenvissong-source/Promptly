@@ -46,6 +46,11 @@ export interface ExportFormatRule {
   underline: number;
   strike: number;
   text_color: string;
+  // 'style' = 老行为（命中片段着色，不改文本）；'replace' = 导出/复制时把命中
+  // 片段替换成 replacement（支持 $1 捕获组）。列名用 rule_mode 而不是 mode，
+  // 避免与 SQLite 里可能的关键字/PRAGMA 命名混淆。
+  rule_mode: 'style' | 'replace';
+  replacement: string;
   created_at: string;
   updated_at: string;
 }
@@ -95,7 +100,7 @@ export async function getDb(): Promise<Database> {
   return db;
 }
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 const DEFAULT_STORAGE_SPACE_NAME = '默认空间';
 const DEFAULT_STORAGE_ROOT_FALLBACK = 'app-data://uploads';
 const DEFAULT_FORMAT_RULE_PATTERN = String.raw`@(图|图片|视频|音频)\d+`;
@@ -227,6 +232,23 @@ async function migrateSchema(database: Database): Promise<void> {
     statements.push([`INSERT INTO export_format_rules (name, pattern, enabled, sort_order, bold, italic, underline, strike, text_color) SELECT '默认媒体引用', ?, 1, 0, 1, 0, 0, 0, '#ff0000' WHERE NOT EXISTS (SELECT 1 FROM export_format_rules)`, [DEFAULT_FORMAT_RULE_PATTERN]]);
     statements.push(['PRAGMA user_version = 4', []]);
     await executeBatch(statements);
+    version = 4;
+  }
+
+  // v5: 复制格式规则从「只能着色」升级为「着色 / 查找替换」二选一。
+  // rule_mode='style' 保持 v4 的行为，老数据全部落在 style 上，行为零变化。
+  if (version < 5) {
+    const ruleColumns = await tableColumns(database, 'export_format_rules');
+    const statements: BatchStatement[] = [];
+    if (!ruleColumns.some((column) => column.name === 'rule_mode')) {
+      statements.push([`ALTER TABLE export_format_rules ADD COLUMN rule_mode TEXT NOT NULL DEFAULT 'style'`, []]);
+    }
+    if (!ruleColumns.some((column) => column.name === 'replacement')) {
+      statements.push([`ALTER TABLE export_format_rules ADD COLUMN replacement TEXT NOT NULL DEFAULT ''`, []]);
+    }
+    statements.push(['PRAGMA user_version = 5', []]);
+    await executeBatch(statements);
+    version = 5;
   }
 }
 
@@ -313,9 +335,9 @@ export async function deleteAppSetting(key: AppSettingKey): Promise<void> {
   await (await getDb()).execute('DELETE FROM app_settings WHERE key = ?', [key]);
 }
 
-const EXPORT_FORMAT_RULE_COLUMNS = 'id, name, pattern, enabled, sort_order, bold, italic, underline, strike, text_color, created_at, updated_at';
+const EXPORT_FORMAT_RULE_COLUMNS = 'id, name, pattern, enabled, sort_order, bold, italic, underline, strike, text_color, rule_mode, replacement, created_at, updated_at';
 
-type MutableExportFormatRuleField = 'name' | 'pattern' | 'enabled' | 'sort_order' | 'bold' | 'italic' | 'underline' | 'strike' | 'text_color';
+type MutableExportFormatRuleField = 'name' | 'pattern' | 'enabled' | 'sort_order' | 'bold' | 'italic' | 'underline' | 'strike' | 'text_color' | 'rule_mode' | 'replacement';
 
 export async function listExportFormatRules(): Promise<ExportFormatRule[]> {
   return (await getDb()).select<ExportFormatRule[]>(`SELECT ${EXPORT_FORMAT_RULE_COLUMNS} FROM export_format_rules ORDER BY sort_order ASC, id ASC`);
@@ -323,7 +345,7 @@ export async function listExportFormatRules(): Promise<ExportFormatRule[]> {
 
 export async function createExportFormatRule(rule: Omit<ExportFormatRule, 'id' | 'created_at' | 'updated_at'>): Promise<ExportFormatRule> {
   const database = await getDb();
-  const result = await database.execute('INSERT INTO export_format_rules (name, pattern, enabled, sort_order, bold, italic, underline, strike, text_color) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)', [rule.name, rule.pattern, rule.enabled, rule.sort_order, rule.bold, rule.italic, rule.underline, rule.strike, rule.text_color]);
+  const result = await database.execute('INSERT INTO export_format_rules (name, pattern, enabled, sort_order, bold, italic, underline, strike, text_color, rule_mode, replacement) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', [rule.name, rule.pattern, rule.enabled, rule.sort_order, rule.bold, rule.italic, rule.underline, rule.strike, rule.text_color, rule.rule_mode, rule.replacement]);
   const rows = await database.select<ExportFormatRule[]>(`SELECT ${EXPORT_FORMAT_RULE_COLUMNS} FROM export_format_rules WHERE id = ?`, [result.lastInsertId as number]);
   return rows[0];
 }
