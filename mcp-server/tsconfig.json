@@ -1,0 +1,33 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    // 复用的前端模块是浏览器代码：GenImagesContext 等是 .tsx，richClipboard 里
+    // 有 document / navigator.clipboard 的调用。所以类型层面需要 dom 与 jsx，
+    // 哪怕运行时（Node）永远不会走到那些分支 —— 序列化路径只用纯函数。
+    "lib": ["ES2022", "DOM"],
+    "jsx": "react-jsx",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["node"],
+
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+
+    // 复用 ../src 下的前端纯函数（序列化器）。那些模块是为浏览器写的，顶层
+    // import 里带 React、DOM 与 @tauri-apps/api，但序列化路径本身不触碰它们。
+    // 这里只检查本 package 自己的代码（include 仅 src/），前端代码的类型正确性
+    // 由根项目的 `tsc -b` 负责，不在这里重复检查 —— 否则会因为缺 DOM lib 报出
+    // 一堆与本 package 无关的错误。
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts"]
+}

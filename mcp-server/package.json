@@ -1,0 +1,23 @@
+{
+  "name": "promptly-mcp-server",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "把 Promptly 的项目、素材与编排好的提示词以 MCP 暴露给 AI 客户端（只读）",
+  "scripts": {
+    "check": "tsc --noEmit",
+    "smoke": "tsx src/smoke.ts",
+    "e2e": "tsx src/e2e.ts",
+    "start": "tsx src/index.ts",
+    "start:http": "tsx src/index.ts --http"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1",
+    "tsx": "^4.19.2",
+    "typescript": "~5.9.3"
+  }
+}
