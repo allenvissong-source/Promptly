@@ -104,6 +104,8 @@ pub struct McpState {
     child: Mutex<Option<Child>>,
     port: Mutex<u16>,
     last_error: Mutex<Option<String>>,
+    /// 写入通道的控制端口与 token，spawn 时通过环境变量传给 MCP server。
+    control: Mutex<Option<(u16, String)>>,
 }
 
 impl Default for McpState {
@@ -112,6 +114,7 @@ impl Default for McpState {
             child: Mutex::new(None),
             port: Mutex::new(DEFAULT_PORT),
             last_error: Mutex::new(None),
+            control: Mutex::new(None),
         }
     }
 }
@@ -155,11 +158,22 @@ impl McpState {
                 .to_string()
         })?;
 
-        let child = Command::new(&node)
+        let mut command = Command::new(&node);
+        command
             .arg(&script)
             .arg("--http")
             .arg("--port")
-            .arg(port.to_string())
+            .arg(port.to_string());
+
+        // 写入通道的坐标：MCP server 是独立进程，靠这两个环境变量找到 App 的控制
+        // 端口并通过校验。没有它们时 server 侧会把写工具标为不可用，只提供读。
+        if let Some((ctl_port, token)) = self.control.lock().unwrap().clone() {
+            command
+                .env("PROMPTLY_CONTROL_PORT", ctl_port.to_string())
+                .env("PROMPTLY_CONTROL_TOKEN", token);
+        }
+
+        let child = command
             // 不继承 stdio：父进程退出时子进程若还往管道写会拿到 SIGPIPE，
             // 而且这些输出对 GUI 应用没有去处。诊断信息通过 status 里的
             // last_error 暴露给设置界面。
@@ -173,6 +187,11 @@ impl McpState {
         *self.port.lock().unwrap() = port;
         *self.last_error.lock().unwrap() = None;
         Ok(self.status(app))
+    }
+
+    /// 记录控制端口与 token，供后续 spawn 时传给子进程。
+    pub fn set_control(&self, port: u16, token: String) {
+        *self.control.lock().unwrap() = Some((port, token));
     }
 
     pub fn stop(&self) {

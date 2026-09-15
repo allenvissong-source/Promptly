@@ -24,6 +24,7 @@ import {
   getMediaById,
 } from './queries.ts';
 import type { ChipMode } from '../../src/context/GenSettingsContext';
+import { requestWrite, writeAvailable } from './write.ts';
 
 export const SERVER_NAME = 'promptly';
 export const SERVER_VERSION = '0.1.0';
@@ -234,6 +235,107 @@ export function createServer(): McpServer {
       }
     }
   );
+
+  // ---- 写工具 -------------------------------------------------------------
+  // 只在由 App 启动（拿到控制端口与 token）时注册。手动启动的进程只能读 ——
+  // 与其注册了再报错，不如不出现在工具列表里，模型也就不会尝试。
+  if (writeAvailable()) {
+    const LOSSY_NOTE =
+      '注意：写入的是纯文本，会覆盖该卡片原有的 @素材引用与 @模板引用（它们会变成普通文字）。' +
+      '若要保留这些引用，请只改不含引用的卡片，或让用户手动编辑。';
+
+    server.registerTool(
+      'update_block',
+      {
+        title: '修改分镜卡片',
+        description:
+          '用新的纯文本替换某个分镜卡片的全部内容。先用 get_blocks 拿到 blockId。' +
+          LOSSY_NOTE,
+        inputSchema: {
+          projectId: projectIdSchema,
+          blockId: z.string().min(1).describe('分镜卡片 id，来自 get_blocks'),
+          text: z.string().describe('新的完整内容，换行用 \\n'),
+        },
+        annotations: { readOnlyHint: false, idempotentHint: true },
+      },
+      async (args) => {
+        try {
+          return text(await requestWrite('update_block', args));
+        } catch (err) {
+          return failure((err as Error).message);
+        }
+      }
+    );
+
+    server.registerTool(
+      'create_block',
+      {
+        title: '新建分镜卡片',
+        description: '在分镜区末尾新建一张卡片并写入内容。新卡片本来是空的，不存在覆盖问题。',
+        inputSchema: {
+          projectId: projectIdSchema,
+          text: z.string().describe('卡片内容，换行用 \\n'),
+        },
+        annotations: { readOnlyHint: false },
+      },
+      async (args) => {
+        try {
+          return text(await requestWrite('create_block', args));
+        } catch (err) {
+          return failure((err as Error).message);
+        }
+      }
+    );
+
+    server.registerTool(
+      'update_template',
+      {
+        title: '修改模板内容',
+        description:
+          '用新的纯文本替换某个模板的全部内容。先用 get_templates 拿到 templateId。' +
+          '`- 角色名: 描述` 这种行会被还原成角色实体，同名角色沿用原有 id，' +
+          '所以分镜区已勾选的角色不会失效；但新增或改名的角色需要用户在分镜区重新勾选。' +
+          LOSSY_NOTE,
+        inputSchema: {
+          projectId: projectIdSchema,
+          templateId: z.string().min(1).describe('模板 id，来自 get_templates'),
+          text: z.string().describe('新的完整内容，换行用 \\n'),
+        },
+        annotations: { readOnlyHint: false, idempotentHint: true },
+      },
+      async (args) => {
+        try {
+          return text(await requestWrite('update_template', args));
+        } catch (err) {
+          return failure((err as Error).message);
+        }
+      }
+    );
+
+    server.registerTool(
+      'delete_card',
+      {
+        title: '删除分镜卡片或模板',
+        description:
+          '删除一张分镜卡片或一个模板。不可逆（用户可用 Ctrl+Z 撤销或从快照还原），' +
+          '因此无论用户的确认设置如何，App 都会先请求用户确认。' +
+          '删除被分镜引用的模板会让那些引用失效，删除前建议先向用户说明。',
+        inputSchema: {
+          projectId: projectIdSchema,
+          kind: z.enum(['block', 'template']).describe('block = 分镜卡片，template = 模板'),
+          cardId: z.string().min(1).describe('要删除的 id'),
+        },
+        annotations: { readOnlyHint: false, destructiveHint: true },
+      },
+      async (args) => {
+        try {
+          return text(await requestWrite('delete_card', args));
+        } catch (err) {
+          return failure((err as Error).message);
+        }
+      }
+    );
+  }
 
   return server;
 }

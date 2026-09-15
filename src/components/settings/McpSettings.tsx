@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { Check, Copy, RefreshCw } from 'lucide-react';
+import {
+  readWriteConfirmMode,
+  setWriteConfirmMode,
+  type WriteConfirmMode,
+} from '../../hooks/useMcpWriteExecutor';
 
 // MCP 服务的设置面板。
 //
@@ -26,6 +31,7 @@ export default function McpSettings() {
   const [busy, setBusy] = useState(false);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirmMode, setConfirmMode] = useState<WriteConfirmMode>(readWriteConfirmMode);
 
   const refresh = useCallback(async () => {
     try {
@@ -121,6 +127,42 @@ export default function McpSettings() {
           </div>
         </div>
       ) : null}
+
+      {/* 写入审批模式。AI 能改分镜与模板内容，所以默认每次都问一声。 */}
+      <div className="mt-3 rounded-lg border border-[#3D3D3D] bg-[#252525] p-3">
+        <div className="mb-1 text-[12px] font-medium text-[#E5E5E5]">AI 写入内容时</div>
+        <div className="mb-2.5 text-[11px] leading-relaxed text-[#8A8A8A]">
+          AI 可以修改分镜卡片与模板的文字、新建卡片。写入走的是和你手动编辑同一条路径，
+          能用 Ctrl+Z 撤销，也能从快照还原。删除操作无论选哪项都会先问你。
+        </div>
+        <div className="grid grid-cols-2 gap-2">
+          {(
+            [
+              ['ask', '每次询问', '推荐，逐条确认'],
+              ['auto', '无需确认', '直接写入，更流畅'],
+            ] as const
+          ).map(([value, label, hint]) => (
+            <button
+              key={value}
+              onClick={() => {
+                setWriteConfirmMode(value);
+                setConfirmMode(value);
+              }}
+              className={`rounded-lg border p-2.5 text-left transition-colors ${
+                confirmMode === value
+                  ? 'border-[#2EC4B6] bg-[#2EC4B6]/10 text-[#E5E5E5]'
+                  : 'border-[#3D3D3D] bg-[#252525] text-[#BDBDBD] hover:bg-[#303030]'
+              }`}
+            >
+              <div className="flex items-center justify-between text-[12px] font-medium">
+                {label}
+                {confirmMode === value && <Check size={13} className="text-[#2EC4B6]" />}
+              </div>
+              <div className="mt-0.5 text-[11px] text-[#8A8A8A]">{hint}</div>
+            </button>
+          ))}
+        </div>
+      </div>
 
       {nodeMissing ? (
         <div className="mt-3 rounded-lg border border-[#5A4A2A] bg-[#2E2718] p-3 text-[12px] leading-relaxed text-[#D9B26A]">

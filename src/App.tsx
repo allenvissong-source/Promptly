@@ -40,6 +40,8 @@ import MediaLibraryPage from './pages/MediaLibraryPage';
 import MediaLibraryView from './components/media/MediaLibraryView';
 import SettingsModal from './components/settings/SettingsModal';
 import FindReplaceBar from './components/gen/FindReplaceBar';
+import McpWriteConfirm from './components/settings/McpWriteConfirm';
+import { useMcpWriteExecutor } from './hooks/useMcpWriteExecutor';
 import {
   Plus,
   X,
@@ -1106,6 +1108,10 @@ function ProjectWorkspace() {
 function AppShell() {
   const { view } = useProject();
 
+  // AI 写入请求的执行器。轮询 Rust 侧的队列，用 store 现有的写方法改内存态，
+  // 落库仍由 autoSave 负责。需要确认时把请求挂到 pending 上，由下面的浮条处理。
+  const { pending: mcpWrites } = useMcpWriteExecutor();
+
   // MCP 服务（HTTP）：用户在设置里开过就随 App 启动一起拉起，关 App 时 Rust 侧的
   // Exit 钩子会收掉子进程。默认不开 —— 一个后台端口不该在用户没要求时就监听。
   // 只管 HTTP 这条；stdio 那条由客户端自己启动，App 不插手。
@@ -1156,6 +1162,8 @@ function AppShell() {
       </div>
       {/* Ctrl+F / Ctrl+H 查找替换浮条：只在项目视图挂载，作用于当前聚焦的卡片 */}
       {view === 'project' && <FindReplaceBar />}
+      {/* AI 写入确认：不限视图，因为请求可能在任何时候到来 */}
+      <McpWriteConfirm pending={mcpWrites} />
     </div>
   );
 }

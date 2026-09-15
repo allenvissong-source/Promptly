@@ -7,6 +7,7 @@ use tauri_plugin_sql::{DbInstances, DbPool};
 #[cfg(target_os = "macos")]
 mod mac_titlebar;
 mod mcp_sidecar;
+mod mcp_write;
 
 const DB_URL: &str = "sqlite:data.db";
 const STORAGE_MARKER: &str = ".promptly-storage.json";
@@ -1353,6 +1354,36 @@ async fn mcp_stop(
     Ok(state.status(&app))
 }
 
+// ---- 写入通道：前端侧的三个接口 ----------------------------------------
+// 前端启动后声明自己在听，之后轮询取待处理请求、执行完回报结果。
+// 用轮询而不是 Tauri 事件推送：前端本来就有定时器，轮询实现简单且不会漏消息
+// （事件在前端还没挂上监听时发出就丢了）。
+
+#[tauri::command]
+async fn mcp_write_listen(
+    state: tauri::State<'_, std::sync::Arc<mcp_write::WriteChannel>>,
+    listening: bool,
+) -> Result<(), String> {
+    state.set_listening(listening);
+    Ok(())
+}
+
+#[tauri::command]
+async fn mcp_write_poll(
+    state: tauri::State<'_, std::sync::Arc<mcp_write::WriteChannel>>,
+) -> Result<Vec<mcp_write::WriteRequest>, String> {
+    Ok(state.take_pending())
+}
+
+#[tauri::command]
+async fn mcp_write_complete(
+    state: tauri::State<'_, std::sync::Arc<mcp_write::WriteChannel>>,
+    result: mcp_write::WriteResult,
+) -> Result<(), String> {
+    state.complete(result);
+    Ok(())
+}
+
 #[tauri::command]
 async fn execute_batch(
     db_instances: tauri::State<'_, DbInstances>,
@@ -1732,6 +1763,7 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(mcp_sidecar::McpState::default())
+        .manage(std::sync::Arc::new(mcp_write::WriteChannel::default()))
         .invoke_handler(tauri::generate_handler![
             get_default_storage_root,
             validate_storage_space,
@@ -1762,9 +1794,31 @@ pub fn run() {
             transcode_preview,
             mcp_status,
             mcp_start,
-            mcp_stop
+            mcp_stop,
+            mcp_write_listen,
+            mcp_write_poll,
+            mcp_write_complete
         ])
         .setup(|app| {
+            // 写入通道的控制端口：MCP server 是独立进程，需要一个本机入口把写请求
+            // 递进来。端口由系统分配、token 每次启动随机生成，两者通过环境变量传给
+            // MCP 子进程，所以必须在可能 spawn 它之前就绪。
+            {
+                let channel = app
+                    .state::<std::sync::Arc<mcp_write::WriteChannel>>()
+                    .inner()
+                    .clone();
+                match mcp_write::start_control_server(channel) {
+                    Ok((port, token)) => {
+                        app.state::<mcp_sidecar::McpState>().set_control(port, token);
+                    }
+                    Err(err) => {
+                        // 控制端口起不来只影响写入，读取照常，所以不阻断启动。
+                        log::warn!("MCP 写入通道未能启动，将只提供只读能力: {err}");
+                    }
+                }
+            }
+
             // Window chrome strategy — the same "keep the native frame, draw your
             // own title bar inside it" approach CapCut / VS Code use:
             //
