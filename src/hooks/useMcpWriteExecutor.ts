@@ -95,18 +95,13 @@ export function useMcpWriteExecutor() {
       }
 
       case 'create_block': {
-        const before = new Set(blocks.blocks.map((b) => b.id));
-        blocks.addBlock();
-        // addBlock 不返回 id（不改它的签名以免影响既有调用方）。新卡片一定追加在
-        // 末尾，所以下一帧从列表里找出这个之前不存在的 id。
-        const id = await new Promise<string>((resolve, reject) => {
-          setTimeout(() => {
-            const created = ctx.current.blockStore.blocks.find((b) => !before.has(b.id));
-            created ? resolve(created.id) : reject(new Error('新建分镜卡片失败'));
-          }, 0);
-        });
+        // addBlock 就地生成并返回 id，所以能立刻往里写内容。
+        // 不要靠「建完等一帧再从列表里找新出现的 id」—— ctx.current 要等重渲染才
+        // 更新，setTimeout(0) 时拿到的还是旧数组，那正是之前「新建分镜卡片失败」
+        // 的成因。
+        const id = blocks.addBlock();
         const text = String(payload.text ?? '');
-        if (text) ctx.current.blockStore.setContent(id, textToContent(text));
+        if (text) blocks.setContent(id, textToContent(text));
         return `已新建分镜卡片 ${id}`;
       }
 
@@ -279,6 +274,9 @@ export function useMcpWriteExecutor() {
           if (message !== lastPollError.current) {
             lastPollError.current = message;
             console.error('[mcp] 轮询写请求失败', err);
+            // 同时上报给 Rust：release 版看不到 console，而排「写入一直不生效」时
+            // 这条错误是唯一能指向根因的线索，要能从 /health 端点读到。
+            void invoke('mcp_write_report_error', { message }).catch(() => {});
           }
         }
       })();

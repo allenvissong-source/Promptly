@@ -26,6 +26,7 @@ use serde_json::Value as JsonValue;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -76,6 +77,10 @@ pub struct WriteChannel {
     /// 前端是否已注册监听。没有监听者就直接拒绝请求，而不是让调用方白等
     /// 25 秒 —— 这种情况通常是 App 没开或还没加载完。
     listening: Arc<Mutex<bool>>,
+    /// 前端取件次数。诊断用：区分「前端没在轮询」与「轮询了但业务上被拒」。
+    polls: AtomicU64,
+    /// 前端上报的最近一次轮询错误。
+    poll_error: Mutex<Option<String>>,
 }
 
 impl Default for WriteChannel {
@@ -85,6 +90,8 @@ impl Default for WriteChannel {
             results: Mutex::new(Results::default()),
             ready: Condvar::new(),
             listening: Arc::new(Mutex::new(false)),
+            polls: AtomicU64::new(0),
+            poll_error: Mutex::new(None),
         }
     }
 }
@@ -153,7 +160,23 @@ impl WriteChannel {
 
     /// 前端来取待处理请求（取走即从队列移除）。
     pub fn take_pending(&self) -> Vec<WriteRequest> {
+        self.polls.fetch_add(1, Ordering::Relaxed);
         std::mem::take(&mut *self.pending.lock().unwrap())
+    }
+
+    /// 诊断信息：前端到底有没有在轮询。「写入一直超时」时最需要知道的就是这个 ——
+    /// 是前端没轮询，还是轮询了但业务上被拒。
+    pub fn diagnostics(&self) -> (bool, u64, Option<String>) {
+        (
+            self.is_listening(),
+            self.polls.load(Ordering::Relaxed),
+            self.poll_error.lock().unwrap().clone(),
+        )
+    }
+
+    /// 前端上报轮询错误。release 版看不到 console，这是唯一能拿到它的途径。
+    pub fn report_poll_error(&self, message: String) {
+        *self.poll_error.lock().unwrap() = Some(message);
     }
 
     /// 前端回报结果。
@@ -229,6 +252,15 @@ fn handle_connection(
 
     let mut request_line = String::new();
     reader.read_line(&mut request_line)?;
+    // 诊断端点：不需要 token，只回「前端是否在轮询、取件多少次」，不含任何用户数据。
+    // 排「写入一直超时」时先看它，能立刻区分「前端没轮询」与「轮询了但业务上被拒」。
+    if request_line.starts_with("GET /health") {
+        let (listening, polls, error) = channel.diagnostics();
+        let body =
+            serde_json::json!({ "listening": listening, "polls": polls, "pollError": error })
+                .to_string();
+        return respond(&mut stream, "200 OK", &body);
+    }
     if !request_line.starts_with("POST /write") {
         return respond(&mut stream, "404 Not Found", r#"{"error":"not found"}"#);
     }

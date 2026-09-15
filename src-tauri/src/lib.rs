@@ -1368,6 +1368,23 @@ async fn mcp_write_listen(
     Ok(())
 }
 
+/// 诊断：前端是否在轮询、取件了多少次。排「写入一直超时」时先看这个。
+#[tauri::command]
+async fn mcp_write_diagnostics(
+    state: tauri::State<'_, std::sync::Arc<mcp_write::WriteChannel>>,
+) -> Result<(bool, u64, Option<String>), String> {
+    Ok(state.diagnostics())
+}
+
+#[tauri::command]
+async fn mcp_write_report_error(
+    state: tauri::State<'_, std::sync::Arc<mcp_write::WriteChannel>>,
+    message: String,
+) -> Result<(), String> {
+    state.report_poll_error(message);
+    Ok(())
+}
+
 #[tauri::command]
 async fn mcp_write_poll(
     state: tauri::State<'_, std::sync::Arc<mcp_write::WriteChannel>>,
@@ -1797,7 +1814,9 @@ pub fn run() {
             mcp_stop,
             mcp_write_listen,
             mcp_write_poll,
-            mcp_write_complete
+            mcp_write_complete,
+            mcp_write_diagnostics,
+            mcp_write_report_error
         ])
         .setup(|app| {
             // 写入通道的控制端口：MCP server 是独立进程，需要一个本机入口把写请求

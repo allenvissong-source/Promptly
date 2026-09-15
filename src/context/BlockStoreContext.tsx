@@ -31,7 +31,7 @@ interface BlockStoreValue {
   hydratedProjectId: number | null;
   save: (expectProjectId?: number) => Promise<void>;
   markSaved: () => void;
-  addBlock: () => void;
+  addBlock: () => string;
   deleteBlock: (id: string) => void;
   // Duplicate a block (copied content/combine flag/images with fresh slot ids)
   // and insert it right after the source.
@@ -186,12 +186,16 @@ export function BlockStoreProvider({ children }: { children: ReactNode }) {
   // across all stores); the per-store handler was removed so the shortcut fires
   // only once. `save` stays exported for that central handler and the button.
 
+  // 返回新卡片的 id，让调用方能紧接着往里写内容（MCP 的「新建并填充」需要它）。
+  // 与 newBlockWithImage 的做法一致：id 在这里就地生成，不依赖后续渲染。
   const addBlock = useCallback(() => {
     record('blk');
+    const id = rid('blk');
     setBlocks((prev) => [
       ...prev,
-      { id: rid('blk'), content: null, combineEnabled: false, images: [] },
+      { id, content: null, combineEnabled: false, images: [] },
     ]);
+    return id;
   }, [record]);
 
   const deleteBlock = useCallback((id: string) => {
