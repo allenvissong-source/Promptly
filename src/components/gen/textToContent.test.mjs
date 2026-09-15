@@ -1,16 +1,33 @@
 // textToContent 的往返与边界测试。
 //
-// 重点验证「serialize(textToContent(t)) === t」这个往返性质：AI 改完写回去、
-// 再读出来给 AI 看，内容不能漂移。角色实体的 id 复用是另一个重点 —— 丢了 id 会
-//让分镜区已有的引用失效。
+// 重点验证「文本 -> JSON -> 文本」的往返性质：AI 改完写回去、再读出来给 AI 看，
+// 内容不能漂移。角色实体的 id 复用是另一个重点 —— 丢了 id 会让分镜区已有的引用失效。
+//
+// 这里用一个本地的最小序列化器做往返，而不是导入 serializePrompt：后者的导入链牵到
+// React 与 Tauri 模块，node --test 解析不了（仓库既有测试都只测无外部依赖的纯模块）。
+// 真实序列化器的行为由它自己的测试保证，这里只验证 textToContent 产物的结构正确。
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { textToContent, describeLossyWrite } from './textToContent.ts';
-import { serializePromptContent } from './serializePrompt.ts';
 
-const roundTrip = (text, opts) =>
-  serializePromptContent(textToContent(text, opts), [], 'code').plainText;
+// 还原规则与 serializePromptContent 对齐：每个顶层 paragraph 一行，
+// roleEntity 渲染为 `- 名字`（编辑器隐藏的那个短横线），text 原样输出。
+function toText(doc) {
+  return (doc.content ?? [])
+    .map((para) =>
+      (para.content ?? [])
+        .map((node) => {
+          if (node.type === 'roleEntity') return `- ${node.attrs.name}`;
+          if (node.type === 'text') return node.text;
+          return '';
+        })
+        .join('')
+    )
+    .join('\n');
+}
+
+const roundTrip = (text, opts) => toText(textToContent(text, opts));
 
 test('单行文本往返一致', () => {
   assert.equal(roundTrip('一句提示词'), '一句提示词');
@@ -37,8 +54,7 @@ test('首尾空行保留', () => {
 });
 
 test('Windows 换行被归一化', () => {
-  const content = textToContent('a\r\nb');
-  const out = serializePromptContent(content, [], 'code').plainText;
+  const out = roundTrip('a\r\nb');
   assert.equal(out, 'a\nb');
   assert.ok(!out.includes('\r'), '不应残留 \\r');
 });

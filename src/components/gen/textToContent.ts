@@ -1,5 +1,23 @@
 import type { JSONContent } from '@tiptap/react';
-import { rolesOf } from './roleUtils';
+
+// 刻意不从 roleUtils 导入 rolesOf：那个模块又导入 GenImagesContext（React 模块），
+// 会把整条 React 依赖链拖进来，让本模块无法被 node --test 直接测。这里只需要「把
+// 文档里的角色收集成 名字->id」这一件事，就地实现十几行，避免为一个纯遍历函数
+// 引入运行时依赖。行为需与 roleUtils.rolesOf 保持一致：按文档顺序、跳过无 id 的。
+function collectRoleIds(content: JSONContent | null | undefined): Map<string, string> {
+  const out = new Map<string, string>();
+  const visit = (node: JSONContent | undefined) => {
+    if (!node) return;
+    if (node.type === 'roleEntity') {
+      const id = (node.attrs?.id as string) ?? '';
+      const name = (node.attrs?.name as string) ?? '';
+      if (id && name && !out.has(name)) out.set(name, id);
+    }
+    node.content?.forEach(visit);
+  };
+  visit(content ?? undefined);
+  return out;
+}
 
 // ============================================================================
 // 纯文本 -> Tiptap JSON
@@ -55,12 +73,7 @@ export function textToContent(
   const { previous, parseRoles = false } = options;
 
   // 旧角色名 -> 旧 id。同名角色沿用旧 id，这样模板被分镜引用时勾选状态不会失效。
-  const knownRoles = new Map<string, string>();
-  if (parseRoles && previous) {
-    for (const role of rolesOf(previous)) {
-      if (role.name && !knownRoles.has(role.name)) knownRoles.set(role.name, role.id);
-    }
-  }
+  const knownRoles = parseRoles && previous ? collectRoleIds(previous) : new Map<string, string>();
 
   // 统一换行符，避免 Windows 换行导致每行末尾多一个 \r。
   const lines = text.replace(/\r\n?/g, '\n').split('\n');
