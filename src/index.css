@@ -335,3 +335,14 @@
 .settings-input-error, .settings-input-error:focus { --tw-ring-color: #E53935; }
 .rule-toggle { display: inline-flex; align-items: center; gap: 0.375rem; }
 .rule-toggle input { accent-color: #2EC4B6; }
+
+/* Ctrl+F / Ctrl+H 查找命中高亮（SearchReplace 扩展的 Decoration class）。
+   仅新增样式，不影响任何既有 mark / 编辑器外观。 */
+.pm-search-hit {
+  background: rgba(46, 196, 182, 0.28);
+  border-radius: 2px;
+}
+.pm-search-hit-active {
+  background: rgba(255, 183, 77, 0.55);
+  box-shadow: 0 0 0 1px rgba(255, 183, 77, 0.9);
+}

@@ -27,6 +27,7 @@ import type { TemplateCandidate } from './mentionSuggestion';
 import { RoleEntityAtom } from './RoleEntityAtom';
 import { TemplateRefAtom } from './TemplateRefAtom';
 import { TemplateRefContext } from './TemplateRefContext';
+import { SearchReplace } from './SearchReplace';
 import { composeTemplateBlock, type StyledLine } from './roleUtils';
 import type { GenImageItem } from '../../context/GenImagesContext';
 import { baseName } from '../../context/GenImagesContext';
@@ -344,6 +345,10 @@ const GenPromptEditor = forwardRef<GenPromptEditorHandle, Props>(
         // changes (add/delete/reorder/duplicate cards) are handled by the
         // app-level HistoryContext timeline instead.
         UndoRedo,
+        // Ctrl+F / Ctrl+H 的查找替换：命中高亮 + 跳转 + 替换命令，由顶层
+        // FindReplaceBar 通过「当前活动编辑器」驱动。不注册任何快捷键，
+        // 避免与既有 Ctrl+S / Ctrl+Z 等全局键位冲突。
+        SearchReplace,
         ...(enableRoleEntity ? [RoleEntityAtom] : []),
         ...(enableTemplateRef ? [TemplateRefAtom] : []),
         MentionAtom.configure({

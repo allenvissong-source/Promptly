@@ -8,10 +8,13 @@ import {
   AlignLeft,
   AlignCenter,
   AlignRight,
+  RemoveFormatting,
+  FoldVertical,
 } from 'lucide-react';
 import type { Editor } from '@tiptap/react';
 import { useActiveEditor } from '../../context/ActiveEditorContext';
 import { PALETTE_ROWS, normalizeHex } from './palette';
+import { collapseBlankLines } from './blankLines';
 
 // 分镜区顶部常驻的富文本格式工具条。它本身不持有编辑器，而是通过
 // ActiveEditorContext 找到「当前聚焦的分镜卡片编辑器」再施加命令。所有命令都先
@@ -200,6 +203,34 @@ export default function FormatToolbar() {
         onClick={() => run((c) => c.setTextAlign('right'))}
       >
         <AlignRight size={15} strokeWidth={2.25} />
+      </TBtn>
+
+      <span className="fmt-sep" />
+
+      {/* 清除格式：unsetAllMarks 清掉选区内全部 mark（加粗/斜体/下划线/删除线，
+          以及 TextStyle 上挂的 color / backgroundColor），再 unsetTextAlign 把
+          段落对齐复位（TextAlign 是 paragraph 的属性，不是 mark）。两条命令在同
+          一个 chain 里跑，所以 Ctrl+Z 一次就能整体撤销。刻意不用 clearNodes()：
+          它会重置节点结构，可能影响 @图片 / 角色实体 / 模板引用这些原子节点。 */}
+      <TBtn
+        title="清除格式"
+        disabled={!has}
+        onClick={() => run((c) => c.unsetAllMarks().unsetTextAlign())}
+      >
+        <RemoveFormatting size={15} strokeWidth={2.25} />
+      </TBtn>
+
+      {/* 清除一行空行：作用于当前活动编辑器的全文（与选区无关），把每一组连续
+          空行各减少 1 行（1→0 / 2→1 / 3→2…）。所有删除在同一个 transaction 里
+          从后往前执行，Ctrl+Z 一次撤销；全文无空行时不 dispatch，纯空操作。 */}
+      <TBtn
+        title="清除一行空行"
+        disabled={!has}
+        onClick={() => {
+          if (ed) collapseBlankLines(ed);
+        }}
+      >
+        <FoldVertical size={15} strokeWidth={2.25} />
       </TBtn>
     </div>
   );

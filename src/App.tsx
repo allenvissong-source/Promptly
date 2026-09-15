@@ -36,6 +36,7 @@ import Home from './pages/Home';
 import MediaLibraryPage from './pages/MediaLibraryPage';
 import MediaLibraryView from './components/media/MediaLibraryView';
 import SettingsModal from './components/settings/SettingsModal';
+import FindReplaceBar from './components/gen/FindReplaceBar';
 import {
   Plus,
   X,
@@ -980,6 +981,8 @@ function AppShell() {
           <ProjectWorkspace />
         )}
       </div>
+      {/* Ctrl+F / Ctrl+H 查找替换浮条：只在项目视图挂载，作用于当前聚焦的卡片 */}
+      {view === 'project' && <FindReplaceBar />}
     </div>
   );
 }
